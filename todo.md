@@ -13,6 +13,9 @@ Java和Android
 Android的话比如Framework是什么知都不知道，AWS什么的。
 
 
+给github上传自己的项目
+
+
 重要性顺序：
 1. Flutter + Compose 手动重构vector （因为我大概率还是从事Android相关开发工作，Java后端并不是很有履历如果实在有好的再说）
    * UI重构
@@ -41,8 +44,35 @@ Android的话比如Framework是什么知都不知道，AWS什么的。
    * 微服务，集群
 
 
+## 项目经历
+
+设备开发：
+* 多机协同`Cross`
+   * 双机备份
+   * 主控协同
+   * 集群同步协同
+
+* 云平台接入`Uber`
+   * SpringBoot控制RK上的CloudApp；CloudApp通过AIDL跟Ijetty交互
+
+* XM项目`CA`前面板的显示，用FFmpeg
+
+* `Ijetty`RK操控服务器
+
+* `CLT语音助手`
+
+* 预监板音频流传输
+
+App上架Google Play
+
+微信小程序
+
+
 
 ## 能力
+
+
+AI使用能力，比如cursor
 
 
 ### SpringBoot
@@ -132,7 +162,6 @@ JNI基本知识
 
 
 #### 音视频流媒体
-
 vector项目中添加音视频相关：
 * YOLOv8
 * Bitmap转音视频
@@ -140,44 +169,12 @@ vector项目中添加音视频相关：
 * FFmpeg
 
 #### Flutter
-
 vector: androidX -> flutter
-
 
 ### RK
 
-
 ### RK3566
 
-
-
-## 项目经历
-
-
-设备开发：
-* 多机协同
-    * 双机备份
-    * 主控协同
-    * 集群同步协同
-
-
-* 云平台接入
-    * SpringBoot控制RK上的CloudApp；CloudApp通过AIDL跟Ijetty交互
-
-
-    
-* XM项目前面板的显示，用FFmpeg
-
-
-
-* 预监板音频流传输
-
-
-
-App上架Google Play
-
-
-微信小程序
 
 
 
