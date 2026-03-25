@@ -63,6 +63,8 @@ Android的话比如Framework是什么知都不知道，AWS什么的。
 
 * 预监板音频流传输
 
+* 麒麟设备操控Flutter App： RTMP拉流播放
+
 App上架Google Play
 
 微信小程序
