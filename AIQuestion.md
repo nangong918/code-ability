@@ -6,6 +6,7 @@
 
 #### Ijetty
 
+[IJetty.md](CLT/IJetty/IJetty.md)
 做过RK芯片上的 为上位机提供Http服务的 App：Ijetty
 前端下发Json到Ijetty，IJetty通过JNI将数据转化为RK芯片接受的V协议（字节帧）。
 接收RK的主动上推V协议帧并通过WebSocket将消息推送给前端。
@@ -40,6 +41,12 @@ STT语音识别，TTS语音合成，VL视觉理解模型实现：
 #### CA前面板
 
 操控设备的前面板App：功能与Ijetty类似，图形化界面操控上位机。
+
+### MAC地址烧录
+SpringBoot部署
+
+
+### ColorPlay播控程序
 
 
 
