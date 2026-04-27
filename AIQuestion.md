@@ -15,6 +15,7 @@
 
 #### Cross
 
+[Cross.md](CLT/Cross/Cross.md)
 做过RK芯片上的 双机备份 和 集群协同 App：cross
 cross在集群之间通过UDP广播discover对方，
 双机备份：开启后同步双机配置，并且主机出问题掉线由背脊顶上。
