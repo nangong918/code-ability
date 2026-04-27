@@ -3,6 +3,8 @@
 
 ## 技术依托
 
+组播相关计算机网络知识参考：[计算机网络.md](../../../knowledge/计算机网络.md)
+
 组播技术依托:
 * MulticastSocket: Java提供的专门用于组播通信的Socket类
     - 创建组播Socket实例
@@ -63,9 +65,8 @@ ms.setNetworkInterface(networkInterface);
 ## 核心代码
 
 
-```java
 
-```
+线程池相关知识参考：[操作系统.md](../../../knowledge/操作系统.md)
 
 ```java
 /// 线程池
