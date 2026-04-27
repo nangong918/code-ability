@@ -29,7 +29,7 @@ SpringBoot通过设备Mac地址映射id访问设备，并对设备发送指令�
 设备将指令通过AIDL直接调用Ijetty。
 
 #### 麒麟
-
+[QiLing.md](CLT/QiLing/QiLing.md)
 操控上位机的Flutter App：跟Ijetty服务器通信，可操控瓶组，拼接设置，连接关系等。
 开发RTMP拉取预监板卡的音视频流，并在麒麟App上展示LED/LCD大屏幕上的设备状态。
 
