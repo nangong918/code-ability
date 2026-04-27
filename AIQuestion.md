@@ -34,7 +34,7 @@ SpringBoot通过设备Mac地址映射id访问设备，并对设备发送指令�
 开发RTMP拉取预监板卡的音视频流，并在麒麟App上展示LED/LCD大屏幕上的设备状态。
 
 #### 灵境
-
+[LingJing.md](CLT/LingJing/LingJing.md)
 做过卡莱特AI智能语音助手，通过科大讯飞的语音唤醒SDK，VAD语音活动检测，LLM大模型，
 STT语音识别，TTS语音合成，VL视觉理解模型实现：
 唤醒语音助手，并对其下发语音/视觉指令，让其调用预制场景与操控场设备。
