@@ -46,8 +46,10 @@ STT语音识别，TTS语音合成，VL视觉理解模型实现：
 也是直接组装V协议发送给RK调用。
 Android Framework定制：系统App，包括：AMS，PMS，WMS定制（开机自动启动前面板，进制下拉，待机动画等）
 
-### MAC地址烧录
-SpringBoot部署
+### 云上（MAC地址烧录）
+[Mac.md](CLT/Mac/Mac.md)
+基于SpringBoot开发MAC地址集中管理平台，实现MAC地址的生成分配、设备绑定、一键烧录功能，
+与Uber云端控制设备联动，采用Docker容器化部署云端服务。
 
 
 ### ColorPlay播控程序
