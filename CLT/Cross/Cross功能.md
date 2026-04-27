@@ -42,7 +42,8 @@ UI展示：收到的数据会被Cross收集并交给Web展示在前端页面List
       "ip": "192.168.1.100",
       "port": 8080,
       "multicastAddress": "224.0.0.1",
-      "multicastPort": 5000
+      "multicastPort": 5000,
+      "syncParamHash": "1234567890abcdef"
     },
     "deviceGroup": {
       "id": "group-123",
@@ -112,5 +113,68 @@ flowchart TD
 
 ## 双机备份
 
+建立之前两台设备的硬件环境和软件版本必须全部一致。
+
+OKHttp实现消息转发
+
+### 建立双机备份之后的逻辑
+```mermaid
+flowchart TD
+    subgraph 主机环境
+        A[主机 Cross] --> A1[Discovery 组播心跳]
+        A --> A2[操控主机IJetty]
+    end
+
+    subgraph 备机环境
+        B[备机 Cross] --> B1[Discovery 组播心跳]
+        B --> B2[操控备机IJetty]
+    end
+
+    subgraph 网络组播
+        M[组播域 225.5.5.5:8992]
+    end
+
+    A1 --> M
+    B1 --> M
+    M --> A1
+    M --> B1
+
+    A -->|建立主备关系| R{主机 Cross 决策}
+    R -->|操控指令| A2
+    R -->|操控指令| B2
+
+    style A fill:#c8e6f5,stroke:#0066cc
+    style B fill:#ffe0b5,stroke:#cc6600
+    style R fill:#d4f1d4,stroke:#2e7d32
+```
+
+### 保证主备数据一致
+* 设置的Post请求同时发送给主机和备机。
+* 获取的Get请求只发给主机，从主机获取数据。
+
+### 同步参数
+* 使用设备的备份功能，生成同步参数文件。
+
+### 主备机参数一致判断
+* 同步参数之后底层的RK给出当前设备文件参数的Hash值，心跳请求的时候比对两个设备的参数Hash值。
+
+
+### 长连WS接转发
+* 建立主备关系之后Web取消直接跟IJetty进行WS通信，而是与Cross进行通信。
+* Cross作为WSClient接收IJetty的长连接消息
+* Cross作为WSServer向Web转发长连接消息
+* 意图：进度等信息需要等待主机和备机同时完成，有些进度需要合并，有些进度需要分别展示。
+* 大部分更新消息取自主机的IJetty，屏蔽备机IJetty的上推。
+
+### 异常情况
+* 主备机数据不一致：弹窗提示
+* 备机掉线：弹窗提示并关闭主备状态，重新登录
+* 主机掉线：Web页面与主机的Cross长连接通讯丢失，从缓存获取到缓存的双机备份组，拿到备机IP并跳转到备机Web页面。
+
 
 ## 多机协同
+
+建立多机协同的设备不需要硬件和软件一致，如果主机执行操作，备机失败，直接不执行并报错就好。
+
+* 主设备执行操作，发送POST给协同组，让协同组做同样的操作
+* 主设备获取GET请求，要异步从所有协同组获取数据，并组成分布式数据给Web前端，主Cross只等待备机3秒，超时则在Web页面显示超时。
