@@ -52,9 +52,6 @@ Android Framework定制：系统App，包括：AMS，PMS，WMS定制（开机自
 与Uber云端控制设备联动，采用Docker容器化部署云端服务。
 
 
-### ColorPlay播控程序
-
-
 
 ### 项目问题
 
