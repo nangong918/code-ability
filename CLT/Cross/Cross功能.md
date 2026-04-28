@@ -34,9 +34,9 @@ Cross会收集信息主动上推展示在对应的web上。
 
 ### 数据同步
 
-#### 3. 主动数据同步
-
 [DataSynchronization.md](DataSynchronization/DataSynchronization.md)
+
+#### 3. 主动数据同步
 
 数据同步检测：同时请求双机的IJetty的接口，IJetty请求RK提供的参数配置文件的当前Hash值。
 Cross比对两者的Hash值，如果一样就提示设备数据一致。不一样则提示主备数据不一致，需要进行数据同步。
@@ -73,8 +73,9 @@ Cross比对两者的Hash值，如果一样就提示设备数据一致。不一�
 
 * 系统鲁棒性
   - 备机掉线：弹窗提示并关闭主备状态，重新登录。
-  - 主机掉线：Web页面与主机的Cross长连接通讯丢失，从缓存获取到缓存的双机备份组，拿到备机IP并跳转到备机Web页面。
+  - 主机掉线：主机的Web（eg：192.168.1.10）页面与主机的Cross长连接通讯丢失，从缓存获取到缓存的双机备份组，拿到备机IP（eg：192.168.1.11）并跳转到备机Web页面。
             同时屏幕的信号源也切换为备机的信号源。
+            如果组播检测到主机上线则切回主备模式，切回主机Web（192.168.1.10）
 
 * 异常情况：
   - 主备机硬件板卡布局，数据不一致：弹窗提示
@@ -86,12 +87,27 @@ Cross比对两者的Hash值，如果一样就提示设备数据一致。不一�
 * 画面源：多屏组，数据源为协同组所有机器
 * 画面职责：协同组画面一致
 
+* 多机协同方案：
+  - 局域网：
+  - 云上：
 
 #### 7. 分布式集群
 主机和分布式集群配置无需一致。
 
 * 画面源：多屏组，数据源为分布式集群所有机器。
-* 画面职责：分布式集群各个设备负责大屏各个区域的画面；需要配置配置连接关系。
+* 画面职责：各设备负责大屏不同区域，需配置连接关系（主机Web通过拖拽的方式配置）。
+* 建立方式：主机通过TCP Socket单播向各节点发起建立请求，
+  请求中携带该节点在大屏的position信息。
+* 位置配置：组播心跳deviceGroup中扩展position字段，
+  描述每台设备在大屏的行列位置。
+* 指令分发：主机根据各节点position下发不同区域画面参数。
+
+* 节点健康检测：
+    - 心跳超时判定节点不健康（复用现有3秒/10秒/3次重试逻辑）
+
+* 节点顶替：
+    - 节点离线后，主机选择集群内其他健康节点顶替
+    - 顶替节点接管离线节点的画面区域，同时输出原区域 + 顶替区域
 
 
 ## 局域网设备发现
@@ -100,64 +116,220 @@ Cross比对两者的Hash值，如果一样就提示设备数据一致。不一�
 
 组播（Multicast）是一种网络通信技术，一个发送者向多个接收者发送相同的数据包，而不需要为每个接收者单独发送。
 
-### 基本流程
-Cross采用的是 对等发现模式
-```mermaid
-graph TD
-    A[设备A] -->|组播| B[局域网]
-    C[设备B] -->|组播| B
-    D[设备C] -->|组播| B
-    
-    B -->|接收| A
-    B -->|接收| C
-    B -->|接收| D
-```
-3秒心跳：每台设备 都会定期（每3秒）发送组播心跳包。
-5秒超时：5秒没收到心跳包则认为设备离线。
-UI展示：收到的数据会被Cross收集并交给Web展示在前端页面List中。
+### 核心心跳数据结构
 
-组播数据结构：
-核心基本信息：ip，mac地址，主备角色
-核心配置信息：ip，端口号，组播地址，组播端口
-设备组信息：组ID，组名称，组类型，组创建时间，组设备列表
+
+
+
 ```json
 {
-    "basicInfo": {
+  "basicInfo": {
+    "ip": "192.168.1.100",
+    "mac": "00:11:22:33:44:55",
+    "name": "Device-001",
+    "version": "V1.3.2",
+    "isMainDevice": true,
+    "boardType": "CLT-1000",
+    "mode": "distributed"
+  },
+  "configInfo": {
+    "enable": true,
+    "ip": "192.168.1.100",
+    "port": 8080,
+    "multicastAddress": "224.0.0.1",
+    "multicastPort": 5000,
+    "syncParamHash": "1234567890abcdef"
+  },
+  "deviceGroup": {
+    "id": "group-123",
+    "name": "Production Line A",
+    "type": "distributed_cluster",
+    "createTime": 1620000000000,
+    "layout": {
+      "rows": 2,
+      "cols": 2
+    },
+    "deviceArr": [
+      {
         "ip": "192.168.1.100",
         "mac": "00:11:22:33:44:55",
         "name": "Device-001",
-        "version": "V1.3.2",
-        "isBackupDevice": false,
-        "boardType": "CLT-1000"
-    },
-    "configInfo": {
-      "enable": true,
-      "ip": "192.168.1.100",
-      "port": 8080,
-      "multicastAddress": "224.0.0.1",
-      "multicastPort": 5000,
-      "syncParamHash": "1234567890abcdef"
-    },
-    "deviceGroup": {
-      "id": "group-123",
-      "name": "Production Line A",
-      "type": "primary_backup",
-      "createTime": 1620000000000,
-      "deviceArr": [
-        {
-          "ip": "192.168.1.100",
-          "mac": "00:11:22:33:44:55",
-          "name": "Device-001",
-          "role": "primary"
+        "role": "primary",
+        "position": {
+          "row": 0,
+          "col": 0
         },
-        {
+        "backupDevice": {
           "ip": "192.168.1.101",
           "mac": "00:11:22:33:44:56",
-          "name": "Device-002",
-          "role": "backup"
-        }
-      ]
-    }
+          "name": "Device-002"
+        },
+        "healthy": true
+      },
+      {
+        "ip": "192.168.1.101",
+        "mac": "00:11:22:33:44:56",
+        "name": "Device-002",
+        "role": "node",
+        "position": {
+          "row": 0,
+          "col": 1
+        },
+        "backupDevice": {
+          "ip": "192.168.1.102",
+          "mac": "00:11:22:33:44:57",
+          "name": "Device-003"
+        },
+        "healthy": true
+      },
+      {
+        "ip": "192.168.1.102",
+        "mac": "00:11:22:33:44:57",
+        "name": "Device-003",
+        "role": "node",
+        "position": {
+          "row": 1,
+          "col": 0
+        },
+        "backupDevice": {
+          "ip": "192.168.1.103",
+          "mac": "00:11:22:33:44:58",
+          "name": "Device-004"
+        },
+        "healthy": true
+      },
+      {
+        "ip": "192.168.1.103",
+        "mac": "00:11:22:33:44:58",
+        "name": "Device-004",
+        "role": "node",
+        "position": {
+          "row": 1,
+          "col": 1
+        },
+        "backupDevice": {
+          "ip": "192.168.1.100",
+          "mac": "00:11:22:33:44:55",
+          "name": "Device-001"
+        },
+        "healthy": true
+      }
+    ]
+  }
+}
+```
+
+Java数据类型定义：
+```java
+/**
+ * 组播心跳数据包，局域网设备发现的核心载体。
+ * 每3秒通过UDP组播发送一次，包含本机信息、服务配置及当前协同组状态。
+ */
+public class MulticastInfoDTO {
+    /** 设备基础信息 */
+    public BasicInfo basicInfo;
+    /** 组播及服务配置 */
+    public ConfigInfo configInfo;
+    /** 协同组/集群信息，未加入任何组时为null */
+    public DeviceGroup deviceGroup;
+}
+
+/**
+ * 设备基础信息，描述本机硬件与身份。
+ */
+public class BasicInfo {
+    public String ip;
+    public String mac;
+    public String name;
+    public String version;
+    /** 是否为主设备，用于Cross角色判定 */
+    public boolean isMainDevice;
+    public String boardType;
+    /** 当前运行模式：primary_backup / collaborative / distributed_cluster */
+    public String mode;
+}
+
+/**
+ * 组播及服务配置，控制发现开关与通信参数。
+ */
+public class ConfigInfo {
+    /** 多机协同功能是否开启，关闭则停止组播收发 */
+    public boolean enable;
+    public String ip;
+    public int port;
+    /** 组播地址，默认225.5.5.5 */
+    public String multicastAddress;
+    /** 组播端口，默认8992 */
+    public int multicastPort;
+    /** 参数配置文件Hash值，用于主备数据一致性比对 */
+    public String syncParamHash;
+}
+
+/**
+ * 协同组/集群信息，描述当前设备所在组的完整状态。
+ * 组内所有设备通过组播交换此信息，维持一致视图。
+ */
+public class DeviceGroup {
+    /** 组唯一标识，建立协同关系时生成 */
+    public String id;
+    public String name;
+    /** 组类型：primary_backup / collaborative / distributed_cluster */
+    public String type;
+    /** 组创建时间，冲突裁决时时间戳大者优先 */
+    public long createTime;
+    /** 大屏布局，仅distributed_cluster类型有效，其他类型为null */
+    public Layout layout;
+    /** 组内设备列表，包含所有在线设备 */
+    public DeviceInfo[] deviceArr;
+}
+
+/**
+ * 大屏拼接布局，描述分布式集群的画面排列。
+ * 仅集群类型为distributed_cluster时填充。
+ */
+public class Layout {
+    /** 大屏行数 */
+    public int rows;
+    /** 大屏列数 */
+    public int cols;
+}
+
+/**
+ * 组内设备节点信息，描述单个设备在组内的角色与状态。
+ */
+public class DeviceInfo {
+    public String ip;
+    public String mac;
+    public String name;
+    /** 设备角色：primary-主机 / backup-备机 / node-集群节点 */
+    public String role;
+    /** 大屏位置，仅distributed_cluster类型有效，其他类型为null */
+    public Position position;
+    /** 顶替设备，节点离线时由该设备自动接管画面区域 */
+    public BackupDevice backupDevice;
+    /** 心跳状态：true在线，false离线（组播心跳超时5秒判定） */
+    public boolean healthy;
+}
+
+/**
+ * 设备在大屏中的行列位置。
+ * 配合Layout中的rows/cols完成画面区域划分。
+ */
+public class Position {
+    /** 行索引，从0开始 */
+    public int row;
+    /** 列索引，从0开始 */
+    public int col;
+}
+
+/**
+ * 顶替设备引用，仅记录ip/mac/name用于标识。
+ * 节点离线时由主机Cross查找该设备并下发顶替指令。
+ */
+public class BackupDevice {
+    public String ip;
+    public String mac;
+    public String name;
 }
 ```
 
