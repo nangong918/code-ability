@@ -10,6 +10,8 @@ Cross比对两者的Hash值，如果一样就提示设备数据一致。不一�
 备机下载成功同步文件之后调用RK的导入备份文件，并上推当前状态。链路执行完成则提示数据同步完成。
 
 
+### 手动数据同步
+
 活动图
 ```mermaid
 flowchart TD
@@ -91,5 +93,154 @@ flowchart TD
     style A3 fill:#fff9c4,stroke:#f9a825
     style F fill:#e8eaf6,stroke:#3949ab
     style W fill:#d4f1d4,stroke:#2e7d32
+```
+
+
+### 数据同步机制
+
+
+#### 双机备份
+
+1. POST请求同时发送给主机和备机，需要同步等待主备机都回复相同的成功结果，否则报错提示主备不一致。
+2. GET请求只从主机获取。
+3. WS长连接：接收主备的WS，但是只向前端转发主机的WS
+
+```mermaid
+flowchart TD
+    subgraph 前端
+        Web[Web前端]
+    end
+
+    subgraph 主机环境
+        CR[主机 Cross]
+        A[主机 IJetty]
+    end
+
+    subgraph 备机环境
+        B[备机 IJetty]
+    end
+
+    Web -->|请求| CR
+
+    CR -->|"POST (同步等待)"| A
+    CR -->|"POST (同步等待)"| B
+    A -->|回复结果| CR
+    B -->|回复结果| CR
+    CR -->|两者一致返回成功<br/>不一致报错| Web
+
+    CR -->|"GET"| A
+    A -->|返回数据| CR
+    CR -->|返回数据| Web
+
+    A -->|WS长连接| CR
+    B -->|WS长连接| CR
+    CR -->|"仅转发主机WS"| Web
+
+    style CR fill:#c8e6f5,stroke:#0066cc
+    style A fill:#c8e6f5,stroke:#0066cc
+    style B fill:#ffe0b5,stroke:#cc6600
+```
+
+
+### 多机协同 
+
+1. POST请求同时发送给协同组，无需检查。
+2. GET请求从所有设备获取。
+3. WS长连接：接收并转发所有设备的WS
+
+```mermaid
+flowchart TD
+    subgraph 前端
+        Web[Web前端]
+    end
+
+    subgraph 主机环境
+        CR[主机 Cross]
+        A[主机 IJetty]
+    end
+
+    subgraph 协同机1环境
+        B[协同机1 IJetty]
+    end
+
+    subgraph 协同机2环境
+        C[协同机2 IJetty]
+    end
+
+    Web -->|请求| CR
+
+    CR -->|"POST (无需检查)"| A
+    CR -->|"POST (无需检查)"| B
+    CR -->|"POST (无需检查)"| C
+
+    CR -->|"GET"| A
+    CR -->|"GET"| B
+    CR -->|"GET"| C
+    A -->|返回数据| CR
+    B -->|返回数据| CR
+    C -->|返回数据| CR
+    CR -->|收集全部数据| Web
+
+    A -->|WS长连接| CR
+    B -->|WS长连接| CR
+    C -->|WS长连接| CR
+    CR -->|"转发全部WS"| Web
+
+    style CR fill:#c8e6f5,stroke:#0066cc
+    style A fill:#c8e6f5,stroke:#0066cc
+    style B fill:#e8d5f5,stroke:#7b1fa2
+    style C fill:#e8d5f5,stroke:#7b1fa2
+```
+
+### 分布式集群
+
+1. POST请求按照不同的参数分别发送给不同的设备，需要异步上推结果，在Web页面展示哪个设备完成了。
+2. GET请求分别从不同的设备获取，异步收集并展示在前端Web。
+3. 接收并转发所有设备的WS。
+4. 
+```mermaid
+flowchart TD
+    subgraph 前端
+        Web[Web前端]
+    end
+
+    subgraph 主机环境
+        CR[主机 Cross]
+        A[主机 IJetty<br/>画面区域1]
+    end
+
+    subgraph 节点1环境
+        B[节点1 IJetty<br/>画面区域2]
+    end
+
+    subgraph 节点2环境
+        C[节点2 IJetty<br/>画面区域3]
+    end
+
+    Web -->|请求| CR
+
+    CR -->|"POST (区域1参数)"| A
+    CR -->|"POST (区域2参数)"| B
+    CR -->|"POST (区域3参数)"| C
+    A -.->|异步上推结果| Web
+    B -.->|异步上推结果| Web
+    C -.->|异步上推结果| Web
+
+    CR -->|"GET (区域1)"| A
+    CR -->|"GET (区域2)"| B
+    CR -->|"GET (区域3)"| C
+    A -.->|异步返回| Web
+    B -.->|异步返回| Web
+    C -.->|异步返回| Web
+
+    A -->|WS长连接| CR
+    B -->|WS长连接| CR
+    C -->|WS长连接| CR
+    CR -->|"转发全部WS"| Web
+
+    style CR fill:#c8e6f5,stroke:#0066cc
+    style A fill:#c8e6f5,stroke:#0066cc
+    style B fill:#fff3e0,stroke:#ef6c00
+    style C fill:#fff3e0,stroke:#ef6c00
 ```
 

@@ -7,9 +7,11 @@
 多机协同：多态设备配置不一致，数据可以不一致，所有设备执行主机的操作，失败则抛异常。
 分布式集群：多设备组成设备集群，每个这杯负责不同的画面，整体组成一个大画面集群。
 
-### 1. 局域网发现
+### 发现与连接
 
 [DiscoveryAndConnect.md](DiscoveryAndConnect/DiscoveryAndConnect.md)
+
+#### 1. 局域网发现
 
 采用UDP组播进行局域网发现
 在启用**多机协同**功能之后，本设备的Cross开始发送组播。
@@ -17,7 +19,7 @@
 3秒心跳发送，5秒超时删除。
 Cross会收集信息主动上推展示在对应的web上。
 
-### 2. 建立双机备份/协同组/集群
+#### 2. 建立双机备份/协同组/集群
 一个设备的Cross向另一个设备的Cross发送原生Java的**TCP Socket**单播请求建立主备关系的请求。
 建立主备关系成功之后两者的组播配置变化，其他设备看到两台设备是建立好协同关系的。
 超时逻辑：
@@ -30,7 +32,9 @@ Cross会收集信息主动上推展示在对应的web上。
 心跳发送和检测都是用的是定时线程池而不是线程sleep。
 写入和读取超时也会提示用户设备延迟高。
 
-### 3. 数据同步
+### 数据同步
+
+#### 3. 主动数据同步
 
 [DataSynchronization.md](DataSynchronization/DataSynchronization.md)
 
@@ -40,27 +44,29 @@ Cross比对两者的Hash值，如果一样就提示设备数据一致。不一�
 导出成功之后通知备机进行参数同步并告知备机的Cross文件路径进行下载。
 备机下载成功同步文件之后调用RK的导入备份文件，并上推当前状态。链路执行完成则提示数据同步完成。
 
-### 4. 数据同步机制
+#### 4. 数据同步机制
 
-#### 双机备份
+##### 双机备份
 1. POST请求同时发送给主机和备机，需要同步等待主备机都回复相同的成功结果，否则报错提示主备不一致。
 2. GET请求只从主机获取。
 3. WS长连接：接收主备的WS，但是只向前端转发主机的WS
 
-#### 多机协同
+##### 多机协同
 1. POST请求同时发送给协同组，无需检查。
 2. GET请求从所有设备获取。
 3. WS长连接：接收并转发所有设备的WS
 
-#### 分布式集群
+##### 分布式集群
 1. POST请求按照不同的参数分别发送给不同的设备，需要异步上推结果，在Web页面展示哪个设备完成了。
 2. GET请求分别从不同的设备获取，异步收集并展示在前端Web。
 3. 接收并转发所有设备的WS。
 
-#### WS长连接介绍
+##### WS长连接介绍
 进度等信息需要等待主机和备机同时完成，有些进度需要合并，有些进度需要分别展示。
 
-### 5. 双机备份
+### 基本模块
+
+#### 5. 双机备份
 主备配置必须完全一致；
 
 * 画面源：单屏幕，数据源为主机
@@ -74,14 +80,14 @@ Cross比对两者的Hash值，如果一样就提示设备数据一致。不一�
   - 主备机硬件板卡布局，数据不一致：弹窗提示
 
 
-### 6. 多机协同
+#### 6. 多机协同
 主机和协同组的配置不必要一致。
 
 * 画面源：多屏组，数据源为协同组所有机器
 * 画面职责：协同组画面一致
 
 
-### 7. 分布式集群
+#### 7. 分布式集群
 主机和分布式集群配置无需一致。
 
 * 画面源：多屏组，数据源为分布式集群所有机器。
@@ -155,82 +161,3 @@ UI展示：收到的数据会被Cross收集并交给Web展示在前端页面List
 }
 ```
 
-
-组播活动图：
-```mermaid
-flowchart TD
-    A[CrossService.onCreate] --> B[DeviceDiscoveryService.start]
-    B --> C[DeviceDiscoveryServiceMulticastImpl]
-    C --> D[创建 Sender: MulticastSenderHelper.create]
-    C --> E[创建 Receiver: MulticastReceiverHelper.create]
-
-    D --> D1[MulticastSocket]
-    D1 --> D2[setNetworkInterface eth0]
-    D2 --> D3[每3秒循环]
-    D3 --> D4{发现开关 isActive?}
-    D4 -- 否 --> D3
-    D4 -- 是 --> D5[采集本机信息<br/>baseInfo + config + group]
-    D5 --> D6[JSON序列化 MulticastInfoDTO]
-    D6 --> D7[DatagramPacket -> 225.5.5.5:8992]
-    D7 --> D3
-
-    E --> E1[MulticastSocket 8992]
-    E1 --> E2[joinGroup 225.5.5.5 eth0]
-    E2 --> E3[接收线程循环 receive]
-    E2 --> E8[定时任务: 每5秒 checkTimeouts]
-
-    E3 --> E4[解析包体 JSON -> MulticastInfoDTO]
-    E4 --> E5{数据合法?}
-    E5 -- 否 --> E3
-    E5 -- 是 --> E6[deviceHeartbeat 更新设备在线时间]
-    E6 --> E7{本机与对端都Enable?}
-    E7 -- 否 --> E3
-    E7 -- 是 --> E9[合并协同组 + 冲突处理]
-    E9 --> E10[mergeGroup并按需WebSocket通知]
-    E10 --> E3
-
-    E8 --> E11{超过5秒无心跳?}
-    E11 -- 是 --> E12[removeDevice]
-    E11 -- 否 --> E8
-```
-
-组播技术依托与核心代码
-[discovery.md](DiscoveryAndConnect/DiscoveryAndConnect.md)
-
-
-## 双机备份
-
-建立之前两台设备的硬件环境和软件版本必须全部一致。
-
-OKHttp实现消息转发
-
-### 建立双机备份之后的逻辑
-```mermaid
-flowchart TD
-    subgraph 主机环境
-        A[主机 Cross] --> A1[Discovery 组播心跳]
-        A --> A2[操控主机IJetty]
-    end
-
-    subgraph 备机环境
-        B[备机 Cross] --> B1[Discovery 组播心跳]
-        B --> B2[操控备机IJetty]
-    end
-
-    subgraph 网络组播
-        M[组播域 225.5.5.5:8992]
-    end
-
-    A1 --> M
-    B1 --> M
-    M --> A1
-    M --> B1
-
-    A -->|建立主备关系| R{主机 Cross 决策}
-    R -->|操控指令| A2
-    R -->|操控指令| B2
-
-    style A fill:#c8e6f5,stroke:#0066cc
-    style B fill:#ffe0b5,stroke:#cc6600
-    style R fill:#d4f1d4,stroke:#2e7d32
-```
