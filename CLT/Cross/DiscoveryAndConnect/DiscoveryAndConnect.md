@@ -1,4 +1,4 @@
-# Cross 组播发现
+# Cross 组播发现与连接
 
 
 ## 设计方案
@@ -282,6 +282,7 @@ flowchart TD
 
 ## 技术依托
 
+### Discovery
 组播相关计算机网络知识参考：[计算机网络.md](../../../knowledge/计算机网络.md)
 
 组播技术依托:
@@ -703,7 +704,16 @@ class NetworkUtils {
 ```
 
 
+### Connect
 
+```java
+// 建立TCP连接
+public Socket connect(String ip, int port) throws IOException {
+    Socket socket = new Socket();
+    socket.connect(new InetSocketAddress(ip, port), CONNECTION_TIMEOUT);
+    return socket;
+}
+```
 
 
 

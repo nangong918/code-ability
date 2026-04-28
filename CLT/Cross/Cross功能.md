@@ -8,6 +8,9 @@
 分布式集群：多设备组成设备集群，每个这杯负责不同的画面，整体组成一个大画面集群。
 
 ### 1. 局域网发现
+
+[DiscoveryAndConnect.md](DiscoveryAndConnect/DiscoveryAndConnect.md)
+
 采用UDP组播进行局域网发现
 在启用**多机协同**功能之后，本设备的Cross开始发送组播。
 局域网内全部的设备开启**多机协同**功能之后，设备会发送和接收组播。
@@ -28,6 +31,9 @@ Cross会收集信息主动上推展示在对应的web上。
 写入和读取超时也会提示用户设备延迟高。
 
 ### 3. 数据同步
+
+[DataSynchronization.md](DataSynchronization/DataSynchronization.md)
+
 数据同步检测：同时请求双机的IJetty的接口，IJetty请求RK提供的参数配置文件的当前Hash值。
 Cross比对两者的Hash值，如果一样就提示设备数据一致。不一样则提示主备数据不一致，需要进行数据同步。
 同步方法，利用RK提供的备份数据功能，主机Cross将本机的数据导出为备份文件，
