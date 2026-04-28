@@ -189,7 +189,7 @@ flowchart TD
 ```
 
 组播技术依托与核心代码
-[discovery.md](discovery/discovery.md)
+[discovery.md](DiscoveryAndConnect/DiscoveryAndConnect.md)
 
 
 ## 双机备份
