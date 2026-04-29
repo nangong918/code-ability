@@ -59,9 +59,19 @@ flowchart TD
 ## 多机协同
 主机和协同组的配置不必要一致。
 
-* 画面源：多屏组，数据源为协同组所有机器
-* 画面职责：协同组画面一致
+- 局域网方案：
+    - 基于UDP组播发现设备
+    - 主机通过TCP Socket单播建立协同组
+    - 指令通过HTTP转发，WS长连接推送状态
+    - 适用场景：同一局域网内多台设备
 
+- 云上方案：
+    - 基于云服务器中转，解决跨网段远距离协同
+    - 设备通过WebSocket长连接注册到云服务器
+    - 主机指令经云服务器转发到各协同机
+    - 适用场景：异地多屏，无法组建局域网
+
+本地局域网活动图：
 ```mermaid
 flowchart TD
     subgraph 前端
@@ -119,6 +129,69 @@ flowchart TD
     style P2 fill:#fff9c4,stroke:#f9a825
     style P3 fill:#fff9c4,stroke:#f9a825
     style S fill:#c8e6c9,stroke:#2e7d32
+```
+
+云上活动图：
+```mermaid
+flowchart TD
+    subgraph 主机侧 - 深圳
+        H_Web[Web前端]
+        H_Cross[主机 Cross]
+        H_IJetty[主机 IJetty]
+        H_Screen[画面]
+    end
+
+    subgraph 云服务器
+        Cloud[云协同服务<br/>WebSocket长连接<br/>设备注册/指令转发/状态推送]
+    end
+
+    subgraph 协同机1 - 北京
+        C1_Cross[协同机1 Cross]
+        C1_IJetty[协同机1 IJetty]
+        C1_Screen[画面1]
+    end
+
+    subgraph 协同机2 - 上海
+        C2_Cross[协同机2 Cross]
+        C2_IJetty[协同机2 IJetty]
+        C2_Screen[画面2]
+    end
+
+    H_Cross -->|WebSocket注册| Cloud
+    C1_Cross -->|WebSocket注册| Cloud
+    C2_Cross -->|WebSocket注册| Cloud
+
+    H_Web -->|请求| H_Cross
+    H_Cross -->|POST/GET指令| Cloud
+
+    Cloud -->|转发指令| C1_Cross
+    Cloud -->|转发指令| C2_Cross
+
+    C1_Cross -->|执行| C1_IJetty
+    C2_Cross -->|执行| C2_IJetty
+
+    C1_IJetty -->|WS状态| C1_Cross
+    C2_IJetty -->|WS状态| C2_Cross
+
+    C1_Cross -->|状态上报| Cloud
+    C2_Cross -->|状态上报| Cloud
+    Cloud -->|状态推送| H_Cross
+    H_Cross -->|推送| H_Web
+
+    H_IJetty --> H_Screen
+    C1_IJetty --> C1_Screen
+    C2_IJetty --> C2_Screen
+
+    H_Screen --> D[多屏组<br/>画面一致]
+    C1_Screen --> D
+    C2_Screen --> D
+
+    style H_Cross fill:#c8e6f5,stroke:#0066cc
+    style H_IJetty fill:#c8e6f5,stroke:#0066cc
+    style Cloud fill:#d4f1d4,stroke:#2e7d32
+    style C1_Cross fill:#e8d5f5,stroke:#7b1fa2
+    style C2_Cross fill:#e8d5f5,stroke:#7b1fa2
+    style D fill:#fce4ec,stroke:#c62828
 ```
 
 ## 分布式集群
