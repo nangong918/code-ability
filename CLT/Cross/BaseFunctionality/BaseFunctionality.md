@@ -59,139 +59,173 @@ flowchart TD
 ## 多机协同
 主机和协同组的配置不必要一致。
 
-- 局域网方案：
+* 画面源：多屏组，数据源为协同组所有机器
+* 画面职责：协同组画面一致
+
+* 多机协同方案：
+
+  - 局域网方案：
     - 基于UDP组播发现设备
     - 主机通过TCP Socket单播建立协同组
     - 指令通过HTTP转发，WS长连接推送状态
     - 适用场景：同一局域网内多台设备
 
-- 云上方案：
+  - 云上方案：
     - 基于云服务器中转，解决跨网段远距离协同
     - 设备通过WebSocket长连接注册到云服务器
     - 主机指令经云服务器转发到各协同机
     - 适用场景：异地多屏，无法组建局域网
 
+* 流媒体传输：
+  - 实时直播场景：管理员通过OBS/FFmpeg推送RTMP流到云服务器
+  - 各协同机从云服务器拉取同一路RTMP流播放
+  - 画面大致同步，无需帧级精确对齐
+  - 控制指令（切换源、音量等）通过Cross的WS长连接下发
+  - RTMP优势：推流生态成熟，OBS/FFmpeg直接可用，延迟1-3秒
+
 本地局域网活动图：
 ```mermaid
 flowchart TD
-    subgraph 前端
-        Web[Web前端]
-    end
+  subgraph 前端
+    Web[Web前端]
+  end
 
-    subgraph 主机
-        H_Cross[主机 Cross]
-        H_IJetty[主机 IJetty]
-    end
+  subgraph 主机
+    H_Cross[主机 Cross]
+    H_IJetty[主机 IJetty]
+  end
 
-    subgraph 协同机1
-        C1_IJetty[协同机1 IJetty]
-    end
+  subgraph 协同机1
+    C1_IJetty[协同机1 IJetty]
+  end
 
-    subgraph 协同机2
-        C2_IJetty[协同机2 IJetty]
-    end
+  subgraph 协同机2
+    C2_IJetty[协同机2 IJetty]
+  end
 
-    subgraph 组播
-        M[组播域]
-    end
+  subgraph 信号源
+    VS[RTMP视频源<br/>管理员OBS推流]
+  end
 
-    H_Cross -->|组播心跳| M
+  subgraph 组播
+    M[组播域]
+  end
 
-    Web -->|请求| H_Cross
+  H_Cross -->|组播心跳| M
 
-    H_Cross -->|POST 广播| H_IJetty
-    H_Cross -->|POST 广播| C1_IJetty
-    H_Cross -->|POST 广播| C2_IJetty
+  Web -->|请求| H_Cross
 
-    H_Cross -->|GET| H_IJetty
-    H_Cross -->|GET| C1_IJetty
-    H_Cross -->|GET| C2_IJetty
+  H_Cross -->|POST 广播| H_IJetty
+  H_Cross -->|POST 广播| C1_IJetty
+  H_Cross -->|POST 广播| C2_IJetty
 
-    H_IJetty -->|WS| H_Cross
-    C1_IJetty -->|WS| H_Cross
-    C2_IJetty -->|WS| H_Cross
+  H_Cross -->|GET| H_IJetty
+  H_Cross -->|GET| C1_IJetty
+  H_Cross -->|GET| C2_IJetty
 
-    H_Cross -->|转发全部WS| Web
+  H_IJetty -->|WS| H_Cross
+  C1_IJetty -->|WS| H_Cross
+  C2_IJetty -->|WS| H_Cross
 
-    H_IJetty --> P1[画面1]
-    C1_IJetty --> P2[画面2]
-    C2_IJetty --> P3[画面3]
+  H_Cross -->|转发全部WS| Web
 
-    P1 --> S[画面一致]
-    P2 --> S
-    P3 --> S
+  VS -->|拉RTMP流| H_IJetty
+  VS -->|拉RTMP流| C1_IJetty
+  VS -->|拉RTMP流| C2_IJetty
 
-    style H_Cross fill:#c8e6f5,stroke:#0066cc
-    style H_IJetty fill:#c8e6f5,stroke:#0066cc
-    style C1_IJetty fill:#e8d5f5,stroke:#7b1fa2
-    style C2_IJetty fill:#e8d5f5,stroke:#7b1fa2
-    style P1 fill:#fff9c4,stroke:#f9a825
-    style P2 fill:#fff9c4,stroke:#f9a825
-    style P3 fill:#fff9c4,stroke:#f9a825
-    style S fill:#c8e6c9,stroke:#2e7d32
+  H_IJetty --> P1[画面1]
+  C1_IJetty --> P2[画面2]
+  C2_IJetty --> P3[画面3]
+
+  P1 --> S[画面一致]
+  P2 --> S
+  P3 --> S
+
+  style H_Cross fill:#c8e6f5,stroke:#0066cc
+  style H_IJetty fill:#c8e6f5,stroke:#0066cc
+  style C1_IJetty fill:#e8d5f5,stroke:#7b1fa2
+  style C2_IJetty fill:#e8d5f5,stroke:#7b1fa2
+  style VS fill:#ffcdd2,stroke:#c62828
+  style P1 fill:#fff9c4,stroke:#f9a825
+  style P2 fill:#fff9c4,stroke:#f9a825
+  style P3 fill:#fff9c4,stroke:#f9a825
+  style S fill:#c8e6c9,stroke:#2e7d32
 ```
 
 云上活动图：
 ```mermaid
 flowchart TD
-    subgraph 主机侧 - 深圳
-        H_Web[Web前端]
-        H_Cross[主机 Cross]
-        H_IJetty[主机 IJetty]
-        H_Screen[画面]
-    end
+  subgraph 主机侧 - 深圳
+    H_Web[Web前端]
+    H_Cross[主机 Cross]
+    H_IJetty[主机 IJetty]
+  end
 
-    subgraph 云服务器
-        Cloud[云协同服务<br/>WebSocket长连接<br/>设备注册/指令转发/状态推送]
-    end
+  subgraph 云服务器
+    Cloud[云协同服务<br/>WebSocket设备注册/指令转发<br/>RTMP流媒体分发]
+  end
 
-    subgraph 协同机1 - 北京
-        C1_Cross[协同机1 Cross]
-        C1_IJetty[协同机1 IJetty]
-        C1_Screen[画面1]
-    end
+  subgraph 信号源
+    VS[管理员OBS推流<br/>RTMP推流到云]
+  end
 
-    subgraph 协同机2 - 上海
-        C2_Cross[协同机2 Cross]
-        C2_IJetty[协同机2 IJetty]
-        C2_Screen[画面2]
-    end
+  subgraph 协同机1 - 北京
+    C1_Cross[协同机1 Cross]
+    C1_IJetty[协同机1 IJetty]
+  end
 
-    H_Cross -->|WebSocket注册| Cloud
-    C1_Cross -->|WebSocket注册| Cloud
-    C2_Cross -->|WebSocket注册| Cloud
+  subgraph 协同机2 - 上海
+    C2_Cross[协同机2 Cross]
+    C2_IJetty[协同机2 IJetty]
+  end
 
-    H_Web -->|请求| H_Cross
-    H_Cross -->|POST/GET指令| Cloud
+  H_Cross -->|WebSocket注册| Cloud
+  C1_Cross -->|WebSocket注册| Cloud
+  C2_Cross -->|WebSocket注册| Cloud
 
-    Cloud -->|转发指令| C1_Cross
-    Cloud -->|转发指令| C2_Cross
+  VS -->|RTMP推流| Cloud
 
-    C1_Cross -->|执行| C1_IJetty
-    C2_Cross -->|执行| C2_IJetty
+  H_Web -->|请求| H_Cross
+  H_Cross -->|POST/GET指令| Cloud
 
-    C1_IJetty -->|WS状态| C1_Cross
-    C2_IJetty -->|WS状态| C2_Cross
+  Cloud -->|转发指令| C1_Cross
+  Cloud -->|转发指令| C2_Cross
 
-    C1_Cross -->|状态上报| Cloud
-    C2_Cross -->|状态上报| Cloud
-    Cloud -->|状态推送| H_Cross
-    H_Cross -->|推送| H_Web
+  C1_Cross -->|执行| C1_IJetty
+  C2_Cross -->|执行| C2_IJetty
 
-    H_IJetty --> H_Screen
-    C1_IJetty --> C1_Screen
-    C2_IJetty --> C2_Screen
+  C1_IJetty -->|WS状态| C1_Cross
+  C2_IJetty -->|WS状态| C2_Cross
 
-    H_Screen --> D[多屏组<br/>画面一致]
-    C1_Screen --> D
-    C2_Screen --> D
+  C1_Cross -->|状态上报| Cloud
+  C2_Cross -->|状态上报| Cloud
+  Cloud -->|状态推送| H_Cross
+  H_Cross -->|推送| H_Web
 
-    style H_Cross fill:#c8e6f5,stroke:#0066cc
-    style H_IJetty fill:#c8e6f5,stroke:#0066cc
-    style Cloud fill:#d4f1d4,stroke:#2e7d32
-    style C1_Cross fill:#e8d5f5,stroke:#7b1fa2
-    style C2_Cross fill:#e8d5f5,stroke:#7b1fa2
-    style D fill:#fce4ec,stroke:#c62828
+  Cloud -->|拉RTMP流| H_IJetty
+  Cloud -->|拉RTMP流| C1_IJetty
+  Cloud -->|拉RTMP流| C2_IJetty
+
+  H_IJetty --> P1[画面1]
+  C1_IJetty --> P2[画面2]
+  C2_IJetty --> P3[画面3]
+
+  P1 --> D[多屏组<br/>画面一致]
+  P2 --> D
+  P3 --> D
+
+  style H_Cross fill:#c8e6f5,stroke:#0066cc
+  style H_IJetty fill:#c8e6f5,stroke:#0066cc
+  style Cloud fill:#d4f1d4,stroke:#2e7d32
+  style VS fill:#ffcdd2,stroke:#c62828
+  style C1_Cross fill:#e8d5f5,stroke:#7b1fa2
+  style C2_Cross fill:#e8d5f5,stroke:#7b1fa2
+  style C1_IJetty fill:#e8d5f5,stroke:#7b1fa2
+  style C2_IJetty fill:#e8d5f5,stroke:#7b1fa2
+  style P1 fill:#fff9c4,stroke:#f9a825
+  style P2 fill:#fff9c4,stroke:#f9a825
+  style P3 fill:#fff9c4,stroke:#f9a825
+  style D fill:#c8e6c9,stroke:#2e7d32
 ```
 
 ## 分布式集群
