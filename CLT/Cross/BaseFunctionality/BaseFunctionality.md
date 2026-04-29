@@ -200,105 +200,248 @@ flowchart TD
 
 * 画面源：多屏组，数据源为分布式集群所有机器。
 * 画面职责：各设备负责大屏不同区域，需配置连接关系（主机Web通过拖拽的方式配置）。
-* 建立方式：主机通过TCP Socket单播向各节点发起建立请求，
+* 建立方式：主机通过TCP Socket单播/云WebSocket向各节点发起建立请求，
   请求中携带该节点在大屏的position信息。
-* 位置配置：组播心跳deviceGroup中扩展position字段，
+* 位置配置：组播心跳/云注册信息中deviceGroup扩展position字段，
   描述每台设备在大屏的行列位置。
 * 指令分发：主机根据各节点position下发不同区域画面参数。
 
-* 节点健康检测：
-    - 心跳超时判定节点不健康（复用现有3秒/10秒/3次重试逻辑）
+* 部署方案：
+  - 局域网方案：同一机房/展厅，交换机直连，低延迟
+  - 云上方案：跨楼宇/跨江，每栋楼RK设备通过4G/5G/光纤注册到云服务器
 
-* 节点顶替：
-    - 节点离线后，主机选择集群内其他健康节点顶替
-    - 顶替节点接管离线节点的画面区域，同时输出原区域 + 顶替区域
+* 云上分布式集群：
+  - 各节点通过WebSocket长连接注册到云服务器
+  - 主机通过云服务器下发position + 同步指令
+  - 各节点独立拉流 → 按position裁剪 → HDMI输出LED屏
+
+* 流媒体传输：
+  - 信号源：
+    - 单一信号源：所有节点拉取同一路视频流（RTSP/HLS）
+    - 多信号源：各节点根据配置拉取不同视频流（RTSP/HLS）
+  - 主机通过云服务器广播当前播放帧号/时间戳
+  - 各节点seek到对应帧后裁剪输出，保证拼接后画面完整同步
+  - 帧同步方案：
+    - 各节点NTP校时，保证时间基准一致
+    - 主机下发playAt指令（绝对时间+帧号）
+    - 各节点提前缓存2-3秒视频帧，按playAt时间点统一播放
+
+* 画面裁剪：
+  - 节点根据layout.rows/cols和自身position计算裁剪区域
+  - 裁剪后缩放至HDMI输出分辨率
 
 
+  
+局域网方案活动图
 ```mermaid
 flowchart TD
-    subgraph 前端
-        Web[Web前端<br/>拖拽配置连接关系]
-    end
+  subgraph 前端
+    Web[Web前端<br/>拖拽配置连接关系]
+  end
 
-    subgraph 主机
-        H_Cross[主机 Cross]
-        H_IJetty[主机 IJetty]
-    end
+  subgraph 主机
+    H_Cross[主机 Cross]
+    H_IJetty[主机 IJetty]
+  end
 
-    subgraph 节点1
-        N1_IJetty[节点1 IJetty]
-    end
+  subgraph 节点1
+    N1_Cross[节点1 Cross]
+    N1_IJetty[节点1 IJetty]
+  end
 
-    subgraph 节点2
-        N2_IJetty[节点2 IJetty]
-    end
+  subgraph 节点2
+    N2_Cross[节点2 Cross]
+    N2_IJetty[节点2 IJetty]
+  end
 
-    subgraph 节点3
-        N3_IJetty[节点3 IJetty]
-    end
+  subgraph 节点3
+    N3_Cross[节点3 Cross]
+    N3_IJetty[节点3 IJetty]
+  end
 
-    subgraph 组播
-        M[组播域]
-    end
+  subgraph 信号源
+    VS[RTSP视频源]
+  end
 
-    Web -->|配置连接关系| H_Cross
+  subgraph 组播
+    M[组播域]
+  end
 
-    H_Cross -->|TCP单播建立集群<br/>携带position信息| N1_IJetty
-    H_Cross -->|TCP单播建立集群<br/>携带position信息| N2_IJetty
-    H_Cross -->|TCP单播建立集群<br/>携带position信息| N3_IJetty
+  Web -->|配置连接关系| H_Cross
 
-    H_Cross -->|组播心跳<br/>含position| M
-    N1_IJetty -.->|组播心跳| M
-    N2_IJetty -.->|组播心跳| M
-    N3_IJetty -.->|组播心跳| M
+  H_Cross -->|TCP单播建立集群<br/>携带position| N1_Cross
+  H_Cross -->|TCP单播建立集群<br/>携带position| N2_Cross
+  H_Cross -->|TCP单播建立集群<br/>携带position| N3_Cross
 
-    Web -->|请求| H_Cross
+  H_Cross -->|组播心跳<br/>含position| M
+  N1_Cross -->|组播心跳| M
+  N2_Cross -->|组播心跳| M
+  N3_Cross -->|组播心跳| M
 
-    H_Cross -->|POST 区域1参数| H_IJetty
-    H_Cross -->|POST 区域2参数| N1_IJetty
-    H_Cross -->|POST 区域3参数| N2_IJetty
-    H_Cross -->|POST 区域4参数| N3_IJetty
+  Web -->|请求| H_Cross
 
-    H_Cross -->|GET 区域1| H_IJetty
-    H_Cross -->|GET 区域2| N1_IJetty
-    H_Cross -->|GET 区域3| N2_IJetty
-    H_Cross -->|GET 区域4| N3_IJetty
+  H_Cross -->|POST 区域1参数| H_IJetty
+  H_Cross -->|POST 区域2参数| N1_IJetty
+  H_Cross -->|POST 区域3参数| N2_IJetty
+  H_Cross -->|POST 区域4参数| N3_IJetty
 
-    H_IJetty -->|WS| H_Cross
-    N1_IJetty -->|WS| H_Cross
-    N2_IJetty -->|WS| H_Cross
-    N3_IJetty -->|WS| H_Cross
+  H_Cross -->|GET 区域1| H_IJetty
+  H_Cross -->|GET 区域2| N1_IJetty
+  H_Cross -->|GET 区域3| N2_IJetty
+  H_Cross -->|GET 区域4| N3_IJetty
 
-    H_Cross -->|转发全部WS| Web
+  H_IJetty -->|WS| H_Cross
+  N1_IJetty -->|WS| H_Cross
+  N2_IJetty -->|WS| H_Cross
+  N3_IJetty -->|WS| H_Cross
 
-    H_IJetty --> P1[画面 区域1]
-    N1_IJetty --> P2[画面 区域2]
-    N2_IJetty --> P3[画面 区域3]
-    N3_IJetty --> P4[画面 区域4]
+  H_Cross -->|转发全部WS| Web
 
-    P1 --> S[大屏拼接]
-    P2 --> S
-    P3 --> S
-    P4 --> S
+  VS -->|拉RTSP流| H_IJetty
+  VS -->|拉RTSP流| N1_IJetty
+  VS -->|拉RTSP流| N2_IJetty
+  VS -->|拉RTSP流| N3_IJetty
 
-    subgraph 节点顶替
-        H_Cross -->|检测心跳超时| HC{节点健康?}
-        HC -->|节点2离线| RP[主机选择健康节点<br/>顶替节点2区域]
-        RP -->|节点1顶替| N1_IJetty
-        N1_IJetty --> P2_2[输出区域1+区域2]
-        HC -->|节点2恢复| RB[自动切回<br/>释放顶替]
-        RB --> P2
-    end
+  H_Cross -->|广播帧号/时间戳| N1_Cross
+  H_Cross -->|广播帧号/时间戳| N2_Cross
+  H_Cross -->|广播帧号/时间戳| N3_Cross
 
-    style H_Cross fill:#c8e6f5,stroke:#0066cc
-    style H_IJetty fill:#c8e6f5,stroke:#0066cc
-    style N1_IJetty fill:#fff3e0,stroke:#ef6c00
-    style N2_IJetty fill:#fff3e0,stroke:#ef6c00
-    style N3_IJetty fill:#fff3e0,stroke:#ef6c00
-    style P1 fill:#fff9c4,stroke:#f9a825
-    style P2 fill:#fff9c4,stroke:#f9a825
-    style P3 fill:#fff9c4,stroke:#f9a825
-    style P4 fill:#fff9c4,stroke:#f9a825
-    style S fill:#c8e6c9,stroke:#2e7d32
-    style P2_2 fill:#ffcdd2,stroke:#c62828
+  H_IJetty -->|seek+裁剪| P1[画面 区域1]
+  N1_IJetty -->|seek+裁剪| P2[画面 区域2]
+  N2_IJetty -->|seek+裁剪| P3[画面 区域3]
+  N3_IJetty -->|seek+裁剪| P4[画面 区域4]
+
+  P1 --> S[大屏拼接]
+  P2 --> S
+  P3 --> S
+  P4 --> S
+
+  style H_Cross fill:#c8e6f5,stroke:#0066cc
+  style H_IJetty fill:#c8e6f5,stroke:#0066cc
+  style N1_Cross fill:#fff3e0,stroke:#ef6c00
+  style N2_Cross fill:#fff3e0,stroke:#ef6c00
+  style N3_Cross fill:#fff3e0,stroke:#ef6c00
+  style N1_IJetty fill:#fff3e0,stroke:#ef6c00
+  style N2_IJetty fill:#fff3e0,stroke:#ef6c00
+  style N3_IJetty fill:#fff3e0,stroke:#ef6c00
+  style VS fill:#ffcdd2,stroke:#c62828
+  style P1 fill:#fff9c4,stroke:#f9a825
+  style P2 fill:#fff9c4,stroke:#f9a825
+  style P3 fill:#fff9c4,stroke:#f9a825
+  style P4 fill:#fff9c4,stroke:#f9a825
+  style S fill:#c8e6c9,stroke:#2e7d32
+```
+
+
+
+云上方案活动图
+```mermaid
+flowchart TD
+  subgraph 前端
+    Web[Web前端<br/>拖拽配置连接关系]
+  end
+
+  subgraph 主机侧
+    H_Cross[主机 Cross]
+    H_IJetty[主机 IJetty]
+  end
+
+  subgraph 云服务器
+    Cloud[云协同服务<br/>WebSocket长连接<br/>设备注册/指令转发/帧号广播]
+  end
+
+  subgraph 楼1
+    N1_Cross[节点1 Cross]
+    N1_IJetty[节点1 IJetty]
+  end
+
+  subgraph 楼2
+    N2_Cross[节点2 Cross]
+    N2_IJetty[节点2 IJetty]
+  end
+
+  subgraph 楼3
+    N3_Cross[节点3 Cross]
+    N3_IJetty[节点3 IJetty]
+  end
+
+  subgraph 信号源
+    VS[RTSP视频源<br/>Camera采集/文件推流]
+  end
+
+  subgraph NTP
+    NTP_Server[NTP校时服务器]
+  end
+
+  Web -->|配置连接关系| H_Cross
+
+  H_Cross -->|WebSocket注册+建集群<br/>携带position| Cloud
+  N1_Cross -->|WebSocket注册+建集群<br/>携带position| Cloud
+  N2_Cross -->|WebSocket注册+建集群<br/>携带position| Cloud
+  N3_Cross -->|WebSocket注册+建集群<br/>携带position| Cloud
+
+  N1_Cross -->|NTP校时| NTP_Server
+  N2_Cross -->|NTP校时| NTP_Server
+  N3_Cross -->|NTP校时| NTP_Server
+
+  Web -->|请求| H_Cross
+
+  H_Cross -->|POST/GET指令| Cloud
+  Cloud -->|转发指令| H_Cross
+  Cloud -->|转发指令| N1_Cross
+  Cloud -->|转发指令| N2_Cross
+  Cloud -->|转发指令| N3_Cross
+
+  H_Cross -->|执行| H_IJetty
+  N1_Cross -->|执行| N1_IJetty
+  N2_Cross -->|执行| N2_IJetty
+  N3_Cross -->|执行| N3_IJetty
+
+  H_IJetty -->|WS状态| H_Cross
+  N1_IJetty -->|WS状态| N1_Cross
+  N2_IJetty -->|WS状态| N2_Cross
+  N3_IJetty -->|WS状态| N3_Cross
+
+  N1_Cross -->|状态上报| Cloud
+  N2_Cross -->|状态上报| Cloud
+  N3_Cross -->|状态上报| Cloud
+  Cloud -->|状态推送| H_Cross
+  H_Cross -->|推送| Web
+
+  VS -->|拉RTSP流<br/>预缓存3秒| H_IJetty
+  VS -->|拉RTSP流<br/>预缓存3秒| N1_IJetty
+  VS -->|拉RTSP流<br/>预缓存3秒| N2_IJetty
+  VS -->|拉RTSP流<br/>预缓存3秒| N3_IJetty
+
+  H_Cross -->|playAt指令<br/>绝对时间+帧号| Cloud
+  Cloud -->|广播playAt| N1_Cross
+  Cloud -->|广播playAt| N2_Cross
+  Cloud -->|广播playAt| N3_Cross
+
+  H_IJetty -->|seek+裁剪| P1[画面 区域1]
+  N1_IJetty -->|seek+裁剪| P2[画面 区域2]
+  N2_IJetty -->|seek+裁剪| P3[画面 区域3]
+  N3_IJetty -->|seek+裁剪| P4[画面 区域4]
+
+  P1 --> S[湘江对岸<br/>完整画面]
+  P2 --> S
+  P3 --> S
+  P4 --> S
+
+  style H_Cross fill:#c8e6f5,stroke:#0066cc
+  style H_IJetty fill:#c8e6f5,stroke:#0066cc
+  style Cloud fill:#d4f1d4,stroke:#2e7d32
+  style N1_Cross fill:#fff3e0,stroke:#ef6c00
+  style N2_Cross fill:#fff3e0,stroke:#ef6c00
+  style N3_Cross fill:#fff3e0,stroke:#ef6c00
+  style N1_IJetty fill:#fff3e0,stroke:#ef6c00
+  style N2_IJetty fill:#fff3e0,stroke:#ef6c00
+  style N3_IJetty fill:#fff3e0,stroke:#ef6c00
+  style VS fill:#ffcdd2,stroke:#c62828
+  style NTP_Server fill:#e8eaf6,stroke:#3949ab
+  style P1 fill:#fff9c4,stroke:#f9a825
+  style P2 fill:#fff9c4,stroke:#f9a825
+  style P3 fill:#fff9c4,stroke:#f9a825
+  style P4 fill:#fff9c4,stroke:#f9a825
+  style S fill:#c8e6c9,stroke:#2e7d32
 ```
