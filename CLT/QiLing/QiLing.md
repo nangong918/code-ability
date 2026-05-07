@@ -7,6 +7,7 @@
 基于Flutter开发麒麟上位机控制App：
 1. 与IJetty服务端通信，实现瓶组控制、拼接设置、连接关系配置等上位机操作。
 2. 使用RTMP+X264编码推流，通过Media3 ExoPlayer（rtmp/hls）拉流播放，实时展示LED/LCD大屏幕设备状态与预监板卡音视频流。
+3. 使用FFmpeg+RTSP进行文件推流，通过Media3 ExoPlayer（rtsp/hls）拉流播放。
 
 
 ## 问题
