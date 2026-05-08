@@ -77,6 +77,168 @@ RK3588 外接摄像头
   - minBufferSize = 1764 × 2 = 3528 字节
   - AudioRecord.getMinBufferSize(44100, MONO, 16BIT) ≈ 3528 字节
 
+### 编解码
+
+由于 Android 的 Camera 采集的数据格式是 YUV，数据量大且 RTMP 不接受，所以需要编码为 H.264 或 H.265 才能封装 RTMP 包。
+同样，Android 的 MIC 采集的数据格式是 PCM，数据量也很大且 RTMP 不接受，并且 RTMP 只接收 AAC 格式音频，所以也需要进行编码。
+
+#### 音频编码
+
+**软编**
+软编指的是用 CPU 进行软件编码，一般采用的是 FAAC 库。
+适合App使用, 因为不确定手机硬件是否支持硬编所以软编是用来兜底的.
+
+```c++
+private:
+    /**
+     * 音频编码相关成员变量
+     * 用于 FAAC 软编码：PCM → AAC
+     */
+    faacEncHandle m_audioCodec = 0;   // FAAC 编码器句柄，保存编码器状态和配置
+    u_long m_inputSamples;            // 每次编码输入的 PCM 采样数（决定了单次编码产生的 AAC 帧时长）
+    u_long m_maxOutputBytes;          // 输出缓冲区最大字节数（编码后的 AAC 数据不会超过此大小）
+    u_char *m_buffer = 0;             // 输出缓冲区指针，存放 FAAC 编码后的 AAC 原始帧数据
+
+// ========== FAAC 软编码，将 PCM 编码为 AAC ==========
+// faacEncEncode: 输入 PCM，输出 AAC 帧到 m_buffer，返回编码后的字节数
+int byteLen = faacEncEncode(
+        m_audioCodec,                              // FAAC 编码器句柄（含编码参数配置）
+        reinterpret_cast<int32_t *>(data),          // 输入：PCM 采样数据（16-bit，按 32-bit 传入以匹配接口要求）
+        static_cast<unsigned int>(m_inputSamples),  // 输入：每次编码的 PCM 采样数
+        m_buffer,                                   // 输出：指向 AAC 编码数据缓冲区（调用前已分配 m_maxOutputBytes 大小）
+        static_cast<unsigned int>(m_maxOutputBytes) // 输出缓冲区最大容量，防止编码溢出
+);
+```
+
+**硬编**
+硬编指的是调用设备专用 DSP（数字信号处理器）芯片进行编码。在 Android 上通过 MediaCodec API 实现。
+优点是效率高、功耗低、几乎不占 CPU，适合长时间推流场景，能明显降低手机发热。
+缺点是兼容性不够稳定，部分冷门机型或老旧设备的硬件编码器可能存在 Bug，导致编码失败或音质异常。
+
+(RK3588 自研芯片优先使用硬编)
+
+```java
+/**
+ * 音频硬编码器，使用 MediaCodec 将 PCM 编码为 AAC
+ */
+public class AudioEncoder {
+    private MediaCodec codec;
+    private MediaFormat format;
+    private boolean running = false;
+
+    /**
+     * 初始化 AAC 硬编码器
+     * @param sampleRate 采样率，如 44100
+     * @param channelCount 声道数，1=单声道，2=双声道
+     * @param bitRate 码率，如 64000
+     */
+    public void init(int sampleRate, int channelCount, int bitRate) throws IOException {
+        // 1. 创建编码器，指定 MIME 类型为 AAC
+        codec = MediaCodec.createEncoderByType(MediaFormat.MIME_TYPE_AUDIO_AAC);
+
+        // 2. 配置编码参数
+        format = MediaFormat.createAudioFormat(
+                MediaFormat.MIME_TYPE_AUDIO_AAC,
+                sampleRate,      // 采样率
+                channelCount     // 声道数
+        );
+        format.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);                // 码率
+        format.setInteger(MediaFormat.KEY_AAC_PROFILE,
+                MediaCodecInfo.CodecProfileLevel.AACObjectLC);               // AAC-LC
+        format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 1024 * 10);        // 输入缓冲区上限
+
+        // 3. 配置并启动编码器（CONFIGURE_FLAG_ENCODE 表示编码模式）
+        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        codec.start();
+        running = true;
+    }
+
+    /**
+     * 送一帧 PCM 数据去编码
+     * @param pcmData PCM 原始数据（16-bit）
+     * @param size 数据长度（字节）
+     * @param presentationTimeUs 该帧的采集时间戳（微秒）
+     */
+    public void encode(byte[] pcmData, int size, long presentationTimeUs) {
+        if (!running) return;
+
+        // 1. 从 MediaCodec 获取空闲输入 Buffer 的索引
+        int inputBufferIndex = codec.dequeueInputBuffer(10000); // 等待 10ms
+        if (inputBufferIndex >= 0) {
+            // 2. 取到 Buffer，填入 PCM 数据
+            ByteBuffer inputBuffer = codec.getInputBuffer(inputBufferIndex);
+            if (inputBuffer != null) {
+                inputBuffer.clear();
+                inputBuffer.put(pcmData, 0, size);
+                // 3. 送回编码器
+                codec.queueInputBuffer(inputBufferIndex, 0, size, presentationTimeUs, 0);
+            }
+        }
+
+        // 4. 尝试取出编码后的 AAC 数据
+        drainEncoder();
+    }
+
+    /**
+     * 从编码器取出 AAC 数据，回调给上层
+     */
+    private void drainEncoder() {
+        MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+        while (true) {
+            int outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 0);
+            if (outputBufferIndex >= 0) {
+                // 成功拿到一帧 AAC
+                ByteBuffer outputBuffer = codec.getOutputBuffer(outputBufferIndex);
+                if (outputBuffer != null && bufferInfo.size > 0) {
+                    byte[] aacData = new byte[bufferInfo.size];
+                    outputBuffer.get(aacData);
+                    outputBuffer.position(bufferInfo.offset); // 恢复 position
+
+                    // 回调：这里交给你的 AudioStream 封装成 RTMP 包
+                    onAACFrameAvailable(aacData, bufferInfo.size, bufferInfo.presentationTimeUs);
+                }
+                codec.releaseOutputBuffer(outputBufferIndex, false);
+            } else if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                // 编码器输出格式变化，一般在这里获取 csd-0（AAC 序列头）
+                MediaFormat newFormat = codec.getOutputFormat();
+                ByteBuffer csd0 = newFormat.getByteBuffer("csd-0");
+                if (csd0 != null) {
+                    byte[] csd = new byte[csd0.remaining()];
+                    csd0.get(csd);
+                    onAACSequenceHeader(csd);
+                }
+            } else if (outputBufferIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                break; // 没有更多输出
+            }
+        }
+    }
+
+    /**
+     * AAC 序列头回调（AudioSpecificConfig），推流前必须发送一次
+     */
+    private void onAACSequenceHeader(byte[] config) {
+        // 封装成 RTMP 音频包，m_body[1] = 0x00（序列头）
+    }
+
+    /**
+     * AAC 帧数据回调
+     */
+    private void onAACFrameAvailable(byte[] aacData, int size, long ptsUs) {
+        // 封装成 RTMP 音频包，m_body[1] = 0x01（原始帧）
+        // 这里和你 FAAC 版本拿到 m_buffer 之后的逻辑完全一样
+    }
+
+    public void stop() {
+        running = false;
+        if (codec != null) {
+            codec.stop();
+            codec.release();
+            codec = null;
+        }
+    }
+}
+```
+
 
 ### RTMP实时推流
 
