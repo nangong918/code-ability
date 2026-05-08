@@ -240,6 +240,253 @@ public class AudioEncoder {
 ```
 
 
+#### 视频编码
+
+**软编**
+同上, 软编使用X264将视频YUV编码为H.264
+
+```c++
+  // ========== x264 软编码，将 YUV 图像编码为 H.264 NAL 单元 ==========
+  x264_nal_t *pp_nal;           // 输出：NAL 单元数组指针
+  int pi_nal;                   // 输出：NAL 单元个数
+  x264_picture_t pic_out;       // 输出：编码后的重建图像（B 帧参考用）
+
+  x264_encoder_encode(videoCodec,  // x264 编码器句柄
+                      &pp_nal,      // 输出：指向 NAL 数组的指针
+                      &pi_nal,      // 输出：NAL 单元数量
+                      pic_in,       // 输入：待编码的 YUV 图像
+                      &pic_out);    // 输出：编码后的图像（含重建帧）
+```
+
+**硬编**
+硬编使用MediaCodec将视频YUV编码为H.264
+
+```java
+/**
+ * 视频硬编码器，使用 MediaCodec 将 YUV 编码为 H.264
+ *
+ * 流程：
+ *   YUV 数据 → 转换色彩格式 → MediaCodec 硬编码 → H.264 NAL → 封装 RTMP 包
+ *
+ * 编码逻辑与 x264 软编完全一致，只是把 x264_encoder_encode 替换为 MediaCodec 队列操作
+ */
+public class VideoEncoder {
+    private static final String TAG = "VideoEncoder";
+    private static final String MIME_TYPE = "video/avc";    // H.264 编码
+    private static final int I_FRAME_INTERVAL = 2;          // 每2秒一个关键帧
+
+    private MediaCodec codec;
+    private int width, height, frameRate, bitRate;
+    private boolean running = false;
+
+    // 色彩格式：硬件编码器接受的 YUV 格式（通常是 NV12 或 YUV420 SemiPlanar）
+    private int colorFormat;
+
+    // 用于 NV21 → NV12 转换的临时缓冲区
+    private byte[] nv12Buffer;
+
+    /**
+     * 初始化 H.264 硬编码器
+     *
+     * @param width     视频宽度
+     * @param height    视频高度
+     * @param frameRate 帧率
+     * @param bitRate   码率（bps），如 2000000 表示 2Mbps
+     */
+    public void init(int width, int height, int frameRate, int bitRate) throws IOException {
+        this.width = width;
+        this.height = height;
+        this.frameRate = frameRate;
+        this.bitRate = bitRate;
+
+        // 1. 创建 H.264 编码器
+        codec = MediaCodec.createEncoderByType(MIME_TYPE);
+
+        // 2. 配置编码参数
+        MediaFormat format = MediaFormat.createVideoFormat(MIME_TYPE, width, height);
+        format.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);                    // 码率
+        format.setInteger(MediaFormat.KEY_FRAME_RATE, frameRate);                // 帧率
+        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL);   // 关键帧间隔（秒）
+        format.setInteger(MediaFormat.KEY_COLOR_FORMAT,
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar);  // 优先 NV12
+        // 码率控制模式：VBR 可变码率（画质优先），CBR 恒定码率（网络推流推荐）
+        format.setInteger(MediaFormat.KEY_BITRATE_MODE,
+                MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
+
+        // 3. 配置编码器
+        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+
+        // 4. 获取编码器实际支持的色彩格式（可能和请求的不同）
+        MediaFormat inputFormat = codec.getInputFormat();
+        colorFormat = inputFormat.getInteger(MediaFormat.KEY_COLOR_FORMAT);
+
+        // 5. 分配 NV12 转换缓冲区（只分配一次，复用）
+        nv12Buffer = new byte[width * height * 3 / 2];
+
+        // 6. 启动编码器
+        codec.start();
+        running = true;
+
+        LOGI("硬编码初始化成功，实际 colorFormat=" + Integer.toHexString(colorFormat));
+    }
+
+    /**
+     * 送一帧 YUV 数据去编码（对应 x264 的 pic_in 赋值 + x264_encoder_encode）
+     *
+     * @param nv21Data          Android Camera 默认输出的 NV21 数据
+     * @param presentationTimeUs 该帧的采集时间戳（微秒），用于音视频同步
+     */
+    public void encode(byte[] nv21Data, long presentationTimeUs) {
+        if (!running || codec == null) return;
+
+        // ========== 第1步：NV21 → NV12 色彩格式转换 ==========
+        // 对应 x264 版本中 camera_type==1 的转换逻辑
+        // NV21: YYYY... + VUVU...  （V 在前）
+        // NV12: YYYY... + UVUV...  （U 在前）
+        nv21ToNv12(nv21Data, nv12Buffer, width, height);
+
+        // ========== 第2步：从 MediaCodec 获取空闲输入 Buffer ==========
+        int inputBufferIndex = codec.dequeueInputBuffer(10000);  // 等待 10ms
+        if (inputBufferIndex >= 0) {
+            ByteBuffer inputBuffer = codec.getInputBuffer(inputBufferIndex);
+            if (inputBuffer != null) {
+                inputBuffer.clear();
+                // 填入 NV12 数据
+                inputBuffer.put(nv12Buffer);
+                // 送回编码器队列，硬件开始编码
+                codec.queueInputBuffer(inputBufferIndex, 0, nv12Buffer.length,
+                        presentationTimeUs, 0);
+            }
+        }
+
+        // ========== 第3步：取出编码后的 H.264 数据 ==========
+        // 对应 x264 版本的 pi_nal 循环 + sendSpsPps / sendFrame
+        drainEncoder();
+    }
+
+    /**
+     * NV21 → NV12 转换
+     *
+     * NV21 内存布局：YYYYYYYY... VUVUVU...
+     * NV12 内存布局：YYYYYYYY... UVUVUV...
+     *
+     * @param nv21   输入 NV21 数据
+     * @param nv12   输出 NV12 数据
+     * @param width  图像宽度
+     * @param height 图像高度
+     */
+    private void nv21ToNv12(byte[] nv21, byte[] nv12, int width, int height) {
+        int frameSize = width * height;
+        int uvSize = frameSize / 2;
+
+        // 拷贝 Y 平面（NV21 和 NV12 的 Y 排布完全一样）
+        System.arraycopy(nv21, 0, nv12, 0, frameSize);
+
+        // 交换 UV 分量：NV21(VU) → NV12(UV)
+        // NV21 中 UV 交错，V 在前 U 在后，需要把 V 和 U 顺序互换
+        for (int i = 0; i < uvSize / 2; i++) {
+            nv12[frameSize + i * 2] = nv21[frameSize + i * 2 + 1];      // U ← 原奇数位
+            nv12[frameSize + i * 2 + 1] = nv21[frameSize + i * 2];      // V ← 原偶数位
+        }
+    }
+
+    /**
+     * 从编码器输出队列取出 H.264 数据
+     *
+     * 对应 x264 版本中遍历 pp_nal 的逻辑：
+     *   - csd-0（SPS+PPS）→ sendSpsPps()
+     *   - IDR/P 帧          → sendFrame()
+     */
+    private void drainEncoder() {
+        MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+
+        while (true) {
+            int outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 0);
+
+            if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                // ========== 编码器输出格式变化 ==========
+                // 获取 SPS 和 PPS（对应 x264 的 NAL_SPS 和 NAL_PPS）
+                MediaFormat newFormat = codec.getOutputFormat();
+                ByteBuffer spsBuffer = newFormat.getByteBuffer("csd-0");  // SPS
+                ByteBuffer ppsBuffer = newFormat.getByteBuffer("csd-1");  // PPS
+
+                if (spsBuffer != null && ppsBuffer != null) {
+                    byte[] sps = new byte[spsBuffer.remaining()];
+                    spsBuffer.get(sps);
+                    byte[] pps = new byte[ppsBuffer.remaining()];
+                    ppsBuffer.get(pps);
+
+                    // 回调：发送 SPS+PPS（对应 x264 的 sendSpsPps）
+                    onSpsPpsAvailable(sps, pps);
+                }
+
+            } else if (outputBufferIndex >= 0) {
+                // ========== 成功取到一帧编码数据 ==========
+                ByteBuffer outputBuffer = codec.getOutputBuffer(outputBufferIndex);
+                if (outputBuffer != null && bufferInfo.size > 0) {
+                    byte[] h264Data = new byte[bufferInfo.size];
+                    outputBuffer.get(h264Data);
+
+                    // 判断关键帧（对应 x264 的 NAL_IDR）
+                    boolean isKeyFrame = (bufferInfo.flags &
+                            MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
+
+                    // 回调：发送视频帧（对应 x264 的 sendFrame）
+                    onFrameAvailable(h264Data, bufferInfo.size,
+                            bufferInfo.presentationTimeUs, isKeyFrame);
+                }
+                codec.releaseOutputBuffer(outputBufferIndex, false);
+
+            } else if (outputBufferIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                break;  // 没有更多输出，退出循环
+            }
+        }
+    }
+
+    /**
+     * SPS+PPS 回调（对应 x264 版本的 sendSpsPps）
+     * 封装成 FLV Video Tag：m_body[0] = 0x17(关键帧) + AVCDecoderConfigurationRecord
+     */
+    private void onSpsPpsAvailable(byte[] sps, byte[] pps) {
+        LOGI("收到 SPS+PPS，spsLen=" + sps.length + ", ppsLen=" + pps.length);
+        // TODO: 封装成 RTMPPacket，发送序列头
+    }
+
+    /**
+     * 视频帧回调（对应 x264 版本的 sendFrame）
+     *
+     * @param h264Data      H.264 编码数据（单个 NAL 单元或 Access Unit）
+     * @param size          数据长度
+     * @param ptsUs         时间戳（微秒）
+     * @param isKeyFrame    是否为关键帧（IDR）
+     */
+    private void onFrameAvailable(byte[] h264Data, int size, long ptsUs,
+                                  boolean isKeyFrame) {
+        LOGI("收到视频帧，size=" + size + ", pts=" + ptsUs / 1000 + "ms, keyFrame=" + isKeyFrame);
+        // TODO: 封装成 RTMPPacket，发送视频帧
+    }
+
+    /**
+     * 停止并释放编码器
+     */
+    public void stop() {
+        running = false;
+        if (codec != null) {
+            try {
+                codec.stop();
+                codec.release();
+            } catch (Exception e) {
+                LOGE("释放编码器失败: " + e.getMessage());
+            }
+            codec = null;
+        }
+    }
+}
+```
+
+#### IBP帧
+
+
 ### RTMP实时推流
 
 #### RTMP 的核心作用
@@ -343,4 +590,7 @@ graph TD
   style C3 fill:#c8e6c9,stroke:#2e7d32,color:#000
   style C4 fill:#c8e6c9,stroke:#2e7d32,color:#000
 ```
+
+
+
 
