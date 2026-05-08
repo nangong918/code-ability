@@ -78,8 +78,107 @@ RK3588 外接摄像头
   - AudioRecord.getMinBufferSize(44100, MONO, 16BIT) ≈ 3528 字节
 
 
+### RTMP实时推流
 
+#### RTMP 的核心作用
 
+RTMP 是基于 TCP 的应用层协议，本质是一个**流媒体封装** + **传输** + **同步协议**
+它的核心目的之一：给每一个音视频帧打统一时间戳（timestamp，毫秒）
+播放器 / 服务器根据 同一流 ID + 时间戳 来对齐音频和视频，防止音画错位、不同步
 
+#### RTMP 封装结构（Chunk → Message → 音视频帧）
+RTMP在收发数据的时候并不是以Message为单位的，⽽是把Message拆分成Chunk发送
 
+封装链路：
+```text
+YUV/PCM 数据 → H.264/AAC 编码 → FLV Tag 封装 → Message → Chunk
+```
+
+网络中传输的全是chunk, 分为video chunk和audio chunk
+
+* 最底层：Chunk（块）—— 最小传输单元
+  Chunk = Chunk Header + Chunk Data，其中 Chunk Data 最大 128 字节。
+
+Chunk Header 分 4 种（Chunk Type）：
+```text
+Type 0：完整头（11 字节），新流第一个包用
+Type 1：无流 ID（7 字节）
+Type 2：仅时间戳增量（3 字节）
+Type 3：无头部（0 字节），连续同类型帧用
+```
+
+* 中层：Message（消息）
+一个 Message = 一个完整音频帧 / 视频帧 / 控制命令。
+Message 固定头:
+```text
+1B  Message Type（8=音频，9=视频）
+3B  Payload Length（帧大小）
+4B  Timestamp（毫秒，同步核心）
+3B  Stream ID（流 ID，区分不同流）
+```
+
+* 中上层：FLV Tag（强制封装格式）
+RTMP 强制要求所有音视频数据以 FLV Tag 格式封装。一个 Message 只包含一个 FLV Tag，FLV Tag 位于 Chunk Data 中。
+FLV Tag = FLV Tag Header（11 字节）+ FLV Tag Body。
+
+FLV Tag Header 结构：
+```text
+1B  TagType（8=音频，9=视频，18=脚本数据）
+3B  DataSize（Tag Body 长度）
+3B  Timestamp（低 24 位）
+1B  TimestampExtended（高 8 位，组成 32 位时间戳）
+3B  StreamID（固定为 0）
+```
+
+FLV Tag Body：
+```text
+音频 FLV Tag Body = AAC 音频数据（含 AAC 序列头或原始帧）
+视频 FLV Tag Body = H.264/H.265 视频数据（含 AVCDecoderConfigurationRecord 或 NALU）
+```
+
+* 上层：音视频数据（Payload）
+音频：必须 AAC-LC（RTMP 强制）
+视频：必须 H.264（AVC）或 H.265（HEVC）
+
+```mermaid
+graph TD
+  A["<b>RTMP Chunk（网络传输单元）</b>"]
+
+  A --> B["<b>Basic Header 基本头</b><br/>1~3 字节"]
+  B --> B1["Fmt (2 bits)<br/>决定 Message Header 长度"]
+  B --> B2["CSID<br/>区分音频流 / 视频流"]
+
+  A --> C["<b>Message Header 消息头</b><br/>0 / 3 / 7 / 11 字节"]
+  C --> C1["Timestamp / Delta<br/>时间戳或增量"]
+  C --> C2["Message Length<br/>消息总长度"]
+  C --> C3["Message Type ID<br/>8=音频 9=视频"]
+  C --> C4["Stream ID<br/>流标识"]
+
+  A --> D["<b>Chunk Data 块数据</b><br/>最大 128 字节"]
+  D --> E["<b>FLV Tag（完整封装格式）</b>"]
+  E --> E1["<b>FLV Tag Header</b> 11字节"]
+  E1 --> E11["TagType (1B)<br/>8=音频 9=视频"]
+  E1 --> E12["DataSize (3B)<br/>音视频数据长度"]
+  E1 --> E13["Timestamp (3B) + Ext (1B)<br/>32位时间戳"]
+  E1 --> E14["StreamID (3B)<br/>固定为 0"]
+  E --> E2["<b>FLV Tag Body</b><br/>编码后的音视频数据<br/>H.264 / AAC"]
+
+  style A fill:#37474f,stroke:#263238,color:#fff
+  style B fill:#e3f2fd,stroke:#1565c0,color:#000
+  style C fill:#e8f5e9,stroke:#2e7d32,color:#000
+  style D fill:#fff3e0,stroke:#e65100,color:#000
+  style E fill:#fff9c4,stroke:#f9a825,color:#000
+  style E1 fill:#fff176,stroke:#f9a825,color:#000
+  style E11 fill:#ffecb3,stroke:#f9a825,color:#000
+  style E12 fill:#ffecb3,stroke:#f9a825,color:#000
+  style E13 fill:#ffecb3,stroke:#f9a825,color:#000
+  style E14 fill:#ffecb3,stroke:#f9a825,color:#000
+  style E2 fill:#ffe082,stroke:#f9a825,color:#000
+  style B1 fill:#bbdefb,stroke:#1565c0,color:#000
+  style B2 fill:#bbdefb,stroke:#1565c0,color:#000
+  style C1 fill:#c8e6c9,stroke:#2e7d32,color:#000
+  style C2 fill:#c8e6c9,stroke:#2e7d32,color:#000
+  style C3 fill:#c8e6c9,stroke:#2e7d32,color:#000
+  style C4 fill:#c8e6c9,stroke:#2e7d32,color:#000
+```
 
