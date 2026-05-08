@@ -283,7 +283,7 @@ flowchart TD
 ## 技术依托
 
 ### Discovery
-组播相关计算机网络知识参考：[计算机网络.md](../../../knowledge/计算机网络.md)
+组播相关计算机网络知识参考：[计算机网络.md](../../../Knowledge/408/计算机网络.md)
 
 组播技术依托:
 * MulticastSocket: Java提供的专门用于组播通信的Socket类
@@ -346,7 +346,7 @@ ms.setNetworkInterface(networkInterface);
 
 
 
-线程池相关知识参考：[操作系统.md](../../../knowledge/操作系统.md)
+线程池相关知识参考：[操作系统.md](../../../Knowledge/408/操作系统.md)
 
 ```java
 /// 线程池
