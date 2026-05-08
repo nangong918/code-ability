@@ -77,6 +77,10 @@ RK3588 外接摄像头
   - minBufferSize = 1764 × 2 = 3528 字节
   - AudioRecord.getMinBufferSize(44100, MONO, 16BIT) ≈ 3528 字节
 
+
+### Android Camera预览
+
+
 ### 编解码
 
 由于 Android 的 Camera 采集的数据格式是 YUV，数据量大且 RTMP 不接受，所以需要编码为 H.264 或 H.265 才能封装 RTMP 包。
@@ -484,6 +488,10 @@ public class VideoEncoder {
 }
 ```
 
+
+#### MediaCodec
+
+
 #### IBP帧
 
 
@@ -591,6 +599,39 @@ graph TD
   style C4 fill:#c8e6c9,stroke:#2e7d32,color:#000
 ```
 
+#### 组装RTMP数据包
+
+音频包
+
+视频包
 
 
+#### RTMP推流
+
+#### Nginx流媒体服务器
+
+
+### RTSP文件推流
+
+#### FFmpeg推流
+
+
+### 拉流与播放
+
+#### CDN
+
+#### ExoPlayer拉流播放
+
+* RTMP 直播
+* RTSP 文件流
+* HLS 在线播放视频
+
+
+### FFmpeg处理流媒体
+
+#### 集成
+* Android集成FFmpeg
+* SpringBoot集成FFmpeg
+
+#### 基本功能
 
