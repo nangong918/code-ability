@@ -1,7 +1,15 @@
 # Media
 
+## 408 理论基础（交叉引用）
 
+阅读流媒体笔记时，可与下列梳理对照，便于理解 **硬编、缓冲队列、网络协议与抓包**：
 
+- [计算机组成原理](../408/计算机组成原理.md)（冯·诺依曼结构、ARM SoC、CPU 与硬件编码器关系）
+- [操作系统](../408/操作系统.md)（进程/线程/协程、线程池、Android 后台策略）
+- [计算机网络](../408/计算机网络.md)（分层模型、Wireshark、RTMP/RTSP/HLS 承载）
+- [数据结构与算法分析](../408/数据结构与算法分析.md)（队列、缓冲与流媒体中的典型用法）
+
+---
 
 ## 大体介绍
 
@@ -78,8 +86,100 @@ RK3588 外接摄像头
   - AudioRecord.getMinBufferSize(44100, MONO, 16BIT) ≈ 3528 字节
 
 
+#### 视频采集（对照音频采集）
+
+本节对应页面：`LivePushDemoActivity` + `Camera2Helper`。
+
+**1) 数据从哪来**
+
+- Camera2 使用 `ImageReader`，格式为 **`ImageFormat.YUV_420_888`**（Android 抽象 YUV420，三平面布局随设备可能不同）。
+- 后台线程 `CameraBackground` 上执行 `OnImageAvailableListener`，避免阻塞主线程。
+
+**2) 平面拷贝与「UV 顺序」**
+
+`YUV_420_888` 的 U/V 平面可能 **交错（类似 NV21/NV12）** 或 **独立平面**，且存在 **rowStride / pixelStride**。项目里用双重循环按 stride 把 UV 填进连续缓冲区，得到上层可用的 **I420 风格** 布局：
+
+```java
+// Camera2Helper.OnImageAvailableListenerImpl：按 plane 的 pixelStride/rowStride 展开 UV
+for (int j = 0; j < height / 2; j++) {
+    for (int k = 0; k < width / 2; k++) {
+        yuvData[offset + dstIndex++] = temp[srcIndex];
+        srcIndex += pixelsStride;   // 相邻像素在缓冲中的步长（1 或 2）
+    }
+    if (pixelsStride == 2) {
+        srcIndex += rowStride - width;
+    } else if (pixelsStride == 1) {
+        srcIndex += rowStride - width / 2;
+    }
+}
+```
+
+**含义**：这不是「迷信矩阵」，而是 **把硬件给出的不定步长布局整理成紧凑 I420**，否则后续 x264（`X264_CSP_I420`）无法直接消费。
+
+**3) 旋转（YUV420pRotate）算不算矩阵变换？吃不吃 CPU？**
+
+- `configureTransform` 里对 **TextureView** 使用的是 **`Matrix`（二维仿射变换）**，用于 **预览画面** 与屏幕方向对齐，主要影响 GPU 纹理映射，**不等于对整帧 YUV 做线性代数矩阵乘法**。
+- 对 **编码用 YUV** 的旋转在 `YuvUtil.YUV420pRotate90/180`：本质是 **像素重排**，复杂度约 **O(宽×高)**，**确实消耗 CPU**；仅在 `rotateDegree` 为 90°/180° 时走这段路径。
+
+**是否有必要？**
+
+- 若编码器、显示器与 Sensor 方向不一致，不旋转会导致 **画面横竖颠倒或 sideways**，且 x264 输入平面与「所见」不一致。
+- 优化方向：**降低预览分辨率、减少旋转频率、换用支持横向输出的采集尺寸、或改为在 GPU/OEM 支持的路径处理**（需更大改动）。硬编码器也可结合 **旋转元数据**（若全流程支持），本项目走 CPU 旋转以保证与现有 x264 输入一致。
+
+**4) YUV 是通用格式吗？嵌入式是否都是 YUV？**
+
+- **相机传感器**常见输出为 **Bayer RAW** 或经 ISP 处理后的 **YUV/RGB**；Android Camera2 对应用暴露 **`YUV_420_888`** 或 **JPEG** 等。
+- **不是全世界都是 YUV**：HDMI、部分管线可能是 RGB；但 **视频编码器标准输入多为 YUV420**（人眼对亮度敏感，色度可下采样），故 **ISP → YUV → 编码** 是移动端极常见路径。
+- **嵌入式/Linux V4L2** 常见 `YUYV`、`NV12`、`MJPEG` 等，需按设备与驱动逐个适配。
+
+**5) JNI 层 `camera_type`（NV21 vs I420）**
+
+`VideoStream::encodeVideo` 中：
+
+- `camera_type == 1`：按 **NV21**（V 在前的交错 UV）拆成 I420 三平面。  
+- `camera_type == 2`：已是 **I420/YV12** 平面，直接 `memcpy`。
+
+两者差异在 **色度平面排列与 UV 顺序**，必须分支处理，否则会偏色或花屏。
+
+---
+
 ### Android Camera预览
 
+**1) YUV 回调与屏幕预览是两条路**
+
+- **预览**：`CaptureRequest` 同时 `addTarget(SurfaceTexture)`，相机硬件把图像送给 **TextureView 的 Surface**，系统/GPU 合成显示，用户看到的是「流畅预览」，**不经过** `onPreviewFrame` 的那套字节数组（除非你再读回）。
+- **编码**：`addTarget(ImageReader.getSurface())` 得到 **YUV_420_888**，经 Java 层整理后 `onPreviewFrame` → JNI → x264。
+
+**2) TextureView vs SurfaceView**
+
+| 对比项 | TextureView | SurfaceView |
+|--------|-------------|-------------|
+| 所在层级 | 普通 View 层级，可 **平移/缩放/旋转/透明度** | 独立 **Surface**，默认在普通 View **下方** |
+| 与 UI 合成 | 易与动画、Material 混排 | 分层复杂，覆盖对话框需注意 |
+| 性能 | 多一层 **Texture**，略增开销 | 传统上 **零拷贝** 直显更省（双缓冲 Surface） |
+| 截图/录屏 | 与其他 View 一致较好处理 | 取决于版本与合成 |
+
+**哪个性能更好？** 纯全屏相机预览、追求极限帧率时 **SurfaceView（或 Surface）更常见**；需要 **与界面动画深度混排** 时 **TextureView 更合适**。本项目 `Camera2Helper` **写死 `TextureView`**（Builder 校验 `previewOn(textureView)`），与 RK3588 文档里「预览依赖 TextureView」一致。
+
+**能否改成 SurfaceView？** 可以：需把 `SurfaceTexture` 换成 **`SurfaceHolder.getSurface()`**，并调整 **生命周期与旋转**；你要求不改代码，此处仅作说明。
+
+**代码锚点（纹理就绪再开相机）**
+
+```java
+// TextureView.SurfaceTextureListener：纹理可用后才 openCamera
+@Override
+public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
+    openCamera();
+}
+```
+
+```java
+// 预览会话：同时绑定预览 Surface 与 ImageReader
+mPreviewRequestBuilder.addTarget(surface);
+mPreviewRequestBuilder.addTarget(mImageReader.getSurface());
+```
+
+---
 
 ### 编解码
 
@@ -115,7 +215,7 @@ int byteLen = faacEncEncode(
 ```
 
 **硬编**
-硬编指的是调用设备专用 DSP（Digital Signal Processor 数字信号处理器）芯片进行编码。在 Android 上通过 MediaCodec API 实现。
+硬编指的是调用设备专用 DSP（数字信号处理器）芯片进行编码。在 Android 上通过 MediaCodec API 实现。
 优点是效率高、功耗低、几乎不占 CPU，适合长时间推流场景，能明显降低手机发热。
 缺点是兼容性不够稳定，部分冷门机型或老旧设备的硬件编码器可能存在 Bug，导致编码失败或音质异常。
 
@@ -491,6 +591,69 @@ public class VideoEncoder {
 
 #### MediaCodec
 
+Android **MediaCodec** 是对底层 **硬件音视频编解码器** 的统一封装（厂家实现 OMX / Codec2），典型用法与「音频采集 AudioRecord」类似的层次结构：**创建 → configure → start → 循环 dequeueInputBuffer / queueInputBuffer → dequeueOutputBuffer → release**。
+
+**1) API 形态**
+
+```java
+// 创建 H.264 编码器
+MediaCodec codec = MediaCodec.createEncoderByType(MediaFormat.MIME_TYPE_VIDEO_AVC);
+MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIME_TYPE_VIDEO_AVC, width, height);
+format.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);           // 目标码率（bps）
+format.setInteger(MediaFormat.KEY_FRAME_RATE, frameRate);       // 帧率
+format.setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat);   // 厂商支持的 YUV 格式（如 NV12）
+format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2);       // 关键帧间隔（秒，语义依厂商）
+format.setInteger(MediaFormat.KEY_BITRATE_MODE,
+        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);   // CBR/VBR 等
+codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+codec.start();
+```
+
+```java
+// 输入一帧（presentationTimeUs 与音频时间对齐）
+int inIx = codec.dequeueInputBuffer(timeoutUs);
+if (inIx >= 0) {
+    ByteBuffer inBuf = codec.getInputBuffer(inIx);
+    inBuf.clear();
+    inBuf.put(nv12OrOther); // 按协商的 colorFormat 填入
+    codec.queueInputBuffer(inIx, 0, size, presentationTimeUs, 0);
+}
+// 取出编码后的压缩帧
+MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+int outIx = codec.dequeueOutputBuffer(info, timeoutUs);
+```
+
+**2) 常用 MediaFormat 键（节选）**
+
+| KEY | 含义 |
+|-----|------|
+| `KEY_BIT_RATE` | 目标码率 |
+| `KEY_FRAME_RATE` | 期望帧率 |
+| `KEY_I_FRAME_INTERVAL` | GOP 大致尺度（秒） |
+| `KEY_COLOR_FORMAT` | 输入像素格式（须查询 CodecCapabilities） |
+| `KEY_BITRATE_MODE` | CBR/VBR 等 |
+| 音频 `KEY_AAC_PROFILE` | AAC 档位 |
+
+**3) 硬编与组成原理、软编的关系**
+
+硬件编码在 SoC 上有独立流水线，CPU 主要负责 **配置与拷缓冲**；软编 x264/FAAC 则占用大量 CPU 周期。详见 [计算机组成原理](../408/计算机组成原理.md) 中的 SoC 示意图。
+
+```mermaid
+flowchart LR
+    subgraph Soft[软编路径 CPU]
+        YUVs[YUV 缓冲] --> X264[x264/faac]
+        X264 --> Pack[封包 RTMP]
+    end
+    subgraph Hard[硬编路径 Codec]
+        YUVh[YUV 缓冲] --> MC[MediaCodec]
+        MC --> ES[H.264 ES/AAC]
+        ES --> Pack2[封包 RTMP]
+    end
+```
+
+**性能量级说明**：硬编相对软编的 CPU 占用通常 **显著更低**、功耗更低；具体倍数与分辨率、帧率、机型强相关，应以 **Systrace / CPU Profiler / dumpsys media.codec** 实测为准，不宜写死倍数。
+
+---
 
 #### IBP帧
 
@@ -953,8 +1116,88 @@ flowchart LR
 
 #### RTMP推流
 
+推流端已完成编码与 FLV Tag 封装后，经 TCP **RTMP** 推送至服务器；服务端可做转发、录制、转 HLS 等（取决于模块）。
+
+---
+
 #### Nginx流媒体服务器
 
+仓库中存在 **两套 Nginx 配置路径**，勿混淆：
+
+| 文件 | 作用 |
+|------|------|
+| `demo/springboot/docker/nginx/nginx.conf` | **仅 HTTP 反向代理**（Spring Boot、MinIO），**无 RTMP** |
+| `demo/springboot/nginx-docker/conf/nginx.conf` | **`nginx-rtmp-module`**：RTMP 接收、**exec ffmpeg** 转多码率、**HLS 切片与点播** |
+
+**1) 本项目的 RTMP + HLS 在做什么（摘录逻辑）**
+
+```nginx
+rtmp {
+    server {
+        listen 1935;
+        application stream {
+            live on;
+            # 收到一路直播后，fork ffmpeg 转五条不同分辨率码率的 RTMP 推回本地其他 application
+            exec ffmpeg -i rtmp://localhost:1935/stream/$name ...
+        }
+        application hls {
+            live on;
+            hls on;
+            hls_fragment 5;
+            hls_playlist_length 10;
+            hls_path /tmp/hls;
+            hls_nested on;
+            hls_variant _720p2628kbs BANDWIDTH=2628000,RESOLUTION=1280x720;
+            # ... 多档 variant 对应 master m3u8
+        }
+    }
+}
+```
+
+- **`exec ffmpeg`**：可看作「服务端收到原始 RTMP 后的 **转码再分发**」，`-s`、`-b:v`、`-r` 等在 **ffmpeg 命令行**里指定 —— 这才是「分辨率/码率」的主要来源；**不是** `nginx.conf` 里单独一个叫「RTMP 分辨率」的魔法开关。
+- **`hls_variant`**：生成 **多码率自适应 HLS**（不同子目录/`iframe`）。  
+- **HTTP `:8080`**：`location /hls { alias /tmp/hls/ }` 提供 **m3u8/ts** 静态下载。
+
+**2) nginx「能实现 rtsp://」吗？**
+
+- **默认 nginx-rtmp 模块不做 RTSP 服务**。  
+- 本项目 **RTSP** 由 **MediaMTX**（单独容器 `:8554`）承担；不要把 RTMP 配置误以为 RTSP。
+
+**3) nginx 与 RTMP「性能」**
+
+- **worker_connections**：限制并发连接。  
+- **chunk_size**：RTMP 分块大小，影响小包聚合行为。  
+- 十万并发播放通常需 **CDN + 边缘**，单机 nginx 瓶颈多在 **网卡带宽与 CPU 转发**。
+
+---
+
+#### MediaMTX（Docker 中的 RTSP）
+
+`docker-compose.yml` 片段：
+
+```yaml
+mediamtx:
+  image: bluenviron/mediamtx:latest
+  ports:
+    - "8554:8554"
+```
+
+**现状**：未挂载自定义 `mediamtx.yml`，即使用 **镜像默认配置**：在 **8554** 上提供 **RTSP 服务**（具体 path 以官方默认为准，常见为 `/path` 形式推/拉）。
+
+**RTSP 在协议栈中的角色（简述）**
+
+- **会话与控制**：`DESCRIBE` / `SETUP` / `PLAY` / `TEARDOWN`，协商传输通道。  
+- **媒体载荷**：常用 **RTP** 承载音视频；传输层可用 **UDP**（低延迟、易丢包）或 **TCP interleaved**（更稳、略增延迟）。  
+- **与 RTMP 对比**：RTMP 更偏「互联网直播一条龙」；RTSP 更偏 **监控、广播设备、局域网媒体**；本项目用 FFmpeg **推 RTSP** 时由 libavformat 完成封装。
+
+```mermaid
+flowchart LR
+    App[FFmpegPushBridge / ff_rtmp_pusher] --> MT[MediaMTX :8554]
+    MT --> Viewer[RTP/RTSP 客户端]
+    MT --> Rec[可选录像/转协议 依配置]
+```
+
+---
 
 ### RTSP文件推流
 
@@ -1159,22 +1402,238 @@ flowchart TD
 
 ### 拉流与播放
 
+#### Android 侧「输入 URL」背后发生了什么（概念）
+
+1. **应用**：ExoPlayer（Media3）构造 `MediaItem.fromUri(url)`，内部选择 **DataSource**（Http、Rtsp、File…）。  
+2. **框架**：建立连接 → **解复用（demux）** 得到压缩包（H.264 NAL、AAC ADTS 等）→ 送入 **MediaCodec 解码** → **AudioTrack / Surface** 输出。  
+3. **同步**：按 **PTS** 将音视频帧送到渲染器；抖动由 **缓冲队列** 吸收。
+
+#### 服务端一对多与极限瓶颈
+
+- **一对多**：源站或边缘节点维护 **一份上行或一份文件**，对每位观众 **复制下行流量**（逻辑上「多读一份」，物理上由内核零拷贝/多路发送优化）。  
+- **极限瓶颈**（常见排序）：**出口带宽** > **CPU 转封装/加密** > **磁盘 I/O** > **连接数/FD**。  
+- **粗算最大并发观看人数（单边缘节点）**：
+
+```text
+最大观众数 N ≈ (边缘可用下行带宽 B) / (单路平均码率 R)
+```
+
+例：边缘 10Gbps ≈ 10×10^9 bps，单路 2Mbps，则 N ≈ 5000（未计协议开销与冗余）。**真实生产**需乘安全系数并测量 **P95 码率**。
+
+**大规模拉流降级**：多码率 HLS、CDN 边缘缓存、限连与排队、降低默认档位、关闭高清档。
+
 #### CDN
+
+**CDN（内容分发网络）** 把静态/准静态内容缓存到 **离用户近的节点**，降低源站压力与 RTT。  
+HLS、DASH、图片、API 静态资源都常见。**实现方式**：多为 **DNS 调度 + 边缘缓存配置**，应用侧通常只需 **把 URL 换为 CDN 域名**；证书与签名 URL 由存储（如 MinIO）配合。
+
+本项目：`CloudVideoItemRow` 中的 `hlsUrl` 由 **Spring Boot 拼 baseUrl**，若不上 CDN，则所有客户端直打你的服务器；要上 CDN 需把 **播放域名** 指到 CDN，源站仍为当前 MinIO/网关。
 
 #### WebRTC
 
+详见文末 **「WebRTC 简介」** 独立小节。
+
 #### ExoPlayer拉流播放
 
-* RTMP 直播
-* RTSP 文件流
-* HLS 在线播放视频
+| 协议 | ExoPlayer 支持思路 |
+|------|----------------------|
+| **HLS** | 内置 `HlsMediaSource`，拉 **m3u8** 再按序取 **ts/fMP4** |
+| **RTMP** | 需依赖扩展或自行实现 DataSource（官方默认不主打 RTMP） |
+| **RTSP** | Media3 对 RTSP 有实验/扩展路径，依版本与模块而定 |
 
+本地缓存播放示例见项目 `LocalHlsPlayerActivity`（下方 HLS 小节）。
+
+---
+
+### HLS 与 DASH
+
+| 协议 | 容器/索引 | 典型场景 |
+|------|------------|----------|
+| **HLS** | m3u8 + MPEG-TS 或 fMP4 | Apple 生态友好、CDN 成熟、点播直播皆宜 |
+| **DASH** | MPD + fMP4 | Android/Web 标准化好，自适应普遍 |
+
+**为何业界常见 HLS 多于 DASH（主观归纳）**：历史兼容、Safari、运维工具链；新项目亦可 **双模板**。
+
+**切片是否等于「不必一次加载全文件」**：是。播放器只请求 **当前片段与索引**，适合长视频与自适应码率。
+
+---
+
+### 本项目 HLS 生成逻辑（Spring Boot + MinIO + 可选 Docker FFmpeg）
+
+**1) 后端 `VideoMediaServiceImpl.ensureVideoArtifacts`**
+
+上传完成后若 MinIO 尚无 HLS，则本地调用 **ffmpeg** 生成切片并上传：
+
+```java
+runCommand(List.of(
+        ffmpegBin, "-y", "-i", sourcePath.toString(),
+        "-c:v", "libx264", "-c:a", "aac",
+        "-hls_time", "6",
+        "-hls_list_size", "0",
+        "-hls_segment_filename", segmentPattern.toString(),
+        localHlsIndex.toString()
+), fileWorkDir);
+```
+
+- **`hls_time 6`**：目标约 6 秒一片（实际按关键帧对齐）。  
+- **`hls_list_size 0`**：m3u8 保留 **全部** 分片列表（适合点播完整列表；直播常用滑动窗口）。
+
+封面：`ffmpeg -ss 00:00:01 -i ... -frames:v 1 cover.jpg`。  
+元数据：`ffprobe` 取时长与码率。
+
+**2) HLS 离线合并为 MP4（`convertHlsToMp4`）**
+
+将本地缓存的 `index.m3u8` **无缝封装**为单个 MP4（不重编码，速度快）：
+
+```java
+runCommand(List.of(
+        ffmpegBin,
+        "-y",
+        "-allowed_extensions", "ALL",
+        "-i",
+        localM3u8.toString(),
+        "-c",
+        "copy",
+        outputMp4.toString()
+), getFileWorkDir(fileId));
+```
+
+合并后的文件上传 MinIO，供 `/video/cloud/download/hls-mp4` 下载。
+
+**3) Docker 内 Nginx-RTMP 另一条路径**
+
+`nginx-docker/conf/nginx.conf` 中 **`exec ffmpeg`** 把 **RTMP 直播** 转成 **多档 RTMP → HLS**，与上面「点播 mp4 转 HLS」是 **不同业务入口**，但都产出 **m3u8 + ts**。
+
+**4) Android 本地播放 `LocalHlsPlayerActivity`**
+
+```java
+player = new ExoPlayer.Builder(this).build();
+playerView.setPlayer(player);
+player.setMediaItem(MediaItem.fromUri(Uri.fromFile(playlistFile)));
+player.prepare();
+player.play();
+```
+
+即用 **file://** 指向缓存目录下的 **index.m3u8**。
+
+**5) HLS 下的 IBP 与 RTMP/RTSP 区别**
+
+- **IBP** 由 **编码器**决定（`libx264` 参数等），与封装格式无关。  
+- **HLS** 只是 **容器切片 + HTTP 分发**；RTMP/RTSP 是 **传输与会话**。同一编码内容可 **转封装** 为多种协议。
+
+**6) 4K / 10GB 电影会不会 OOM？**
+
+- ExoPlayer **不会**把整个文件载入内存；按片段 **流式** 下载解码。  
+- OOM 更常见原因：**缓冲过大、泄漏、纹理/Glide 误用**。  
+- HLS **缓解**「一次下载整文件」的问题；仍需注意 **单片段过大** 时调整切片与缓存策略。
+
+---
+
+### 播放原理（IBP、ExoPlayer 底层）
+
+- **编码侧**产出带 **I/P/B** 的压缩流；**解码侧**按 **DTS/PTS** 重排序后输出帧。  
+- **ExoPlayer**：`Renderer`（Video/Audio）从 `SampleQueue` 取压缩样本 → **MediaCodec** 解码 → 视频 **Surface**、音频 **AudioTrack**。  
+- **同步**：以 **音频为主时钟** 或 **独立时钟** 对齐视频（实现依版本与配置）。
+
+---
+
+### FFmpeg 在本项目中的集成
+
+**Android（flutteraar / aarlib）**
+
+- `CMakeLists.txt` 将 **`libffmpeg.so`**、**x264**、**faac**、**librtmp** 链成 **`aar_live`**：  
+  - `ff_rtmp_pusher.cpp`：文件/网络源 **推 RTMP/RTSP**。  
+  - `FFmpegPushBridge.java`：`System.loadLibrary("aar_live")`。  
+- **注意**：这是 **NDK 链入 FFmpeg 动态库**，并非命令行 `ffmpeg` 可执行文件。
+
+**Spring Boot（Dockerfile）**
+
+```dockerfile
+RUN apt-get install -y --no-install-recommends ffmpeg
+```
+
+业务代码通过 **`Runtime` 调 `ffmpeg` / `ffprobe`**（见 `VideoMediaServiceImpl`）。
+
+---
+
+### 项目中 FFmpeg 职能清单（附代码锚点）
+
+| 职能 | 位置 |
+|------|------|
+| RTSP/RTMP **文件推流** | `ff_rtmp_pusher.cpp` + `FFmpegPushBridge` |
+| 上传 **MP4 抽帧封面** | `generateCover()`：`ffmpeg -ss ... -frames:v 1` |
+| **MP4 → HLS** 上传 MinIO | `ensureVideoArtifacts`：`-f hls` 参数 |
+| **HLS m3u8 合并为 mp4** | `VideoMediaServiceImpl` 中 `hls to mp4` 接口实现（`ffmpeg -i index.m3u8 ...`） |
+
+---
+
+### FFmpeg 在流媒体中的常见职能（通用）
+
+解复用、编码、转码、缩放、切片、截图、加水印、抽帧、格式探测（ffprobe）。  
+**Android**：Native API `avformat_*` / **命令行不可用时**用库；**Spring Boot**：`ProcessBuilder` 调 CLI 简单可靠。
+
+---
+
+### WebRTC 简介与对比
+
+| 维度 | WebRTC | RTMP | RTSP | HLS |
+|------|--------|------|------|-----|
+| 传输 | UDP SRTP + ICE | TCP | TCP/UDP | HTTP TCP |
+| 延迟 | **极低** | 中 | 中低 | 较高 |
+| 适用 | 连麦、会议 | 直播推流 | 监控/广播 | 点播/大规模分发 |
+
+**集成思路（概要）**
+
+- **服务器**：Janus、mediasoup、Kurento、或云厂商 RTC；需 **TURN/STUN** 穿 NAT。  
+- **Android**：`org.webrtc`（Google 官方库），`PeerConnectionFactory` 创建 **PeerConnection**，`addTrack` 发送音视频。
+
+```java
+// 示意：仅展示 API 形态，非本项目代码
+PeerConnectionFactory factory = PeerConnectionFactory.builder().createPeerConnectionFactory();
+MediaConstraints constraints = new MediaConstraints();
+PeerConnection pc = factory.createPeerConnection(rtcConfig, constraints, observer);
+```
+
+---
+
+### 生产问题排查（花屏、卡顿、不同步、黑屏）
+
+**思路顺序**：**现象复现 → 区分编码/网络/解码 → 缩小范围**。
+
+一渲染屏幕，未停止 A 源就直接切 B 源 会出现的现象
+
+| 现象 | 优先怀疑 | 新增场景原因 |
+|------|-----------|--------------|
+| 花屏 | 丢包（UDP）、参考帧损坏、SPS/PPS 不匹配 | 单Surface多源未做切换互斥，A/B数据源同时抢占渲染画布 |
+| 卡顿 | 码率过高、缓冲不足、CPU 过热降频 | 双源同时写入Surface，渲染缓冲区队列拥堵溢出 |
+| 音画不同步 | 时间戳错误、采集时钟漂移、播放器缓冲策略 | 前数据源时间戳未清空，新数据源时间轴叠加错乱 |
+| 黑屏 | 无关键帧、解码器失败、Surface 未就绪 | 未停止旧数据源直接切新源，Surface画布被抢占覆盖 |
+
+**工具**：Android **Logcat**、`adb bugreport`、**Systrace**；网络 **Wireshark**（见 [计算机网络](../408/计算机网络.md)）；服务端 **nginx-stat**、带宽监控。
+
+**长时间越播越卡**：查 **内存泄漏**（Handler、Context、Native 缓冲）、**队列无限增长**、**解码器未释放**。
+
+**服务器推流内存泄漏**：`valgrind`/jemalloc 统计、对比 **连接前后 RSS**、检查 **是否每个会话释放 FFmpeg 上下文**。
+
+#### 线程池、Service 与协程（直播工程）
+
+- **软编（x264/faac）**：CPU 密集，宜 **单线程专用** 或 **有界线程池**，避免与 UI 抢核；队列用 **有界 + 拒绝/丢帧** 策略。  
+- **硬编（MediaCodec）**：驱动异步回调较常见，仍要避免 **阻塞 MediaCodec 回调线程**。  
+- **持续推流**：产品级常用 **前台 Service** 保活；**WorkManager** 适合「上传后转码」这类可延期任务，不适合超低延迟直播。  
+- **Kotlin 协程**：IO 用 `Dispatchers.IO`，CPU 预处理用 `Dispatchers.Default`，勿在 `Main` 上做重计算。
+
+系统整理见 [操作系统](../408/操作系统.md)。
+
+---
 
 ### FFmpeg处理流媒体
 
 #### 集成
-* Android集成FFmpeg
-* SpringBoot集成FFmpeg
+
+* **Android**：NDK + `libffmpeg.so` + JNI（见 `aarlib/src/main/cpp/CMakeLists.txt`）。  
+* **SpringBoot**：Docker 镜像安装 **ffmpeg 可执行文件**，Java `runCommand` 调用。
 
 #### 基本功能
+
+见上文「FFmpeg 在流媒体中的常见职能」与「项目中 FFmpeg 职能清单」。
 
