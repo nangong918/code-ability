@@ -76,6 +76,7 @@ RK3588 外接摄像头
 - 采样点 AudioFormat.ENCODING_PCM_16BIT
   - 采样率是「一秒采多少次」
   - 16BIT 是每一个采样点用 16bit (2 字节) 存储声音大小
+- 音频一帧的字节大小 frameBytes
 - 缓冲区 bufferSize
   - 没有缓冲区的话采集的音频也无法立即播放会丢失, 所以需要一个缓冲区来存储音频数据
   - 计算公式: 每秒字节数 = 采样率 × 声道数 × 每采样点字节数 (44000 × 1 × 2 = 88000)
@@ -85,65 +86,233 @@ RK3588 外接摄像头
   - minBufferSize = 1764 × 2 = 3528 字节
   - AudioRecord.getMinBufferSize(44100, MONO, 16BIT) ≈ 3528 字节
 
-
-#### 视频采集（对照音频采集）
-
-本节对应页面：`LivePushDemoActivity` + `Camera2Helper`。
-
-**1) 数据从哪来**
-
-- Camera2 使用 `ImageReader`，格式为 **`ImageFormat.YUV_420_888`**（Android 抽象 YUV420，三平面布局随设备可能不同）。
-- 后台线程 `CameraBackground` 上执行 `OnImageAvailableListener`，避免阻塞主线程。
-
-**2) 平面拷贝与「UV 顺序」**
-
-`YUV_420_888` 的 U/V 平面可能 **交错（类似 NV21/NV12）** 或 **独立平面**，且存在 **rowStride / pixelStride**。项目里用双重循环按 stride 把 UV 填进连续缓冲区，得到上层可用的 **I420 风格** 布局：
+##### 核心代码片段
 
 ```java
-// Camera2Helper.OnImageAvailableListenerImpl：按 plane 的 pixelStride/rowStride 展开 UV
-for (int j = 0; j < height / 2; j++) {
-    for (int k = 0; k < width / 2; k++) {
-        yuvData[offset + dstIndex++] = temp[srcIndex];
-        srcIndex += pixelsStride;   // 相邻像素在缓冲中的步长（1 或 2）
+// 配置AudioRecord
+private AudioCaptureTask(LivePusherBridge bridge) {
+    int channelConfig = AUDIO_CHANNELS == 2
+            ? AudioFormat.CHANNEL_IN_STEREO
+            : AudioFormat.CHANNEL_IN_MONO;
+    frameBytes = Math.max(bridge.getAudioInputByteCount(), 2048);
+    int minBufferSize = AudioRecord.getMinBufferSize(
+            AUDIO_SAMPLE_RATE, channelConfig, AudioFormat.ENCODING_PCM_16BIT);
+    int bufferSize = Math.max(minBufferSize, frameBytes);
+    audioRecord = new AudioRecord(
+            MediaRecorder.AudioSource.MIC,
+            AUDIO_SAMPLE_RATE,
+            channelConfig,
+            AudioFormat.ENCODING_PCM_16BIT,
+            bufferSize);
+}
+
+// 启动AudioRecord并将数据发送给JNI
+@Override
+public void run() {
+    byte[] buffer = new byte[frameBytes];
+    audioRecord.startRecording();
+    while (running && pushing) {
+        int len = audioRecord.read(buffer, 0, buffer.length);
+        if (len <= 0) continue;
+        if (len == buffer.length) {
+            bridge.pushAudioFrame(buffer.clone());
+        } else {
+            byte[] exact = new byte[len];
+            System.arraycopy(buffer, 0, exact, 0, len);
+            bridge.pushAudioFrame(exact);
+        }
     }
-    if (pixelsStride == 2) {
-        srcIndex += rowStride - width;
-    } else if (pixelsStride == 1) {
-        srcIndex += rowStride - width / 2;
-    }
+}
+
+/**
+ * 推送一帧 PCM 音频数据到 native 编码与发送链路。
+ */
+public void pushAudioFrame(byte[] data) {
+  ensureStarted();
+  if (mute || data == null || data.length == 0) {
+    return;
+  }
+  native_pushAudio(data);
 }
 ```
 
-**含义**：这不是「迷信矩阵」，而是 **把硬件给出的不定步长布局整理成紧凑 I420**，否则后续 x264（`X264_CSP_I420`）无法直接消费。
+#### Android 视频采集
 
-**3) 旋转（YUV420pRotate）算不算矩阵变换？吃不吃 CPU？**
+**1) 设备从哪来**
 
+CameraManager 获取 Camera
+```java
+CameraManager cameraManager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
+```
+
+CameraDevice 状态回调 (获取相机实例)
+
+```java
+private final CameraDevice.StateCallback mDeviceStateCallback = new CameraDevice.StateCallback() {
+  /**
+   * 相机硬件【打开成功】
+   * 系统已成功获取相机硬件权限，准备就绪
+   */
+  @Override
+  public void onOpened(@NonNull CameraDevice cameraDevice) {
+    // 保存相机设备实例（后续创建会话、预览都靠它）
+    mCameraDevice = cameraDevice;
+  }
+};
+```
+
+
+**2) 矩阵变换**
+相机预览天生有 3 个问题
+* 相机输出图像是横的（宽 > 高）
+* 手机 / 开发板屏幕是竖的（高 > 宽）
+* 相机图像方向和屏幕方向不一致（旋转 90/270 度）
+所以要对相机的画面进行矩阵变换, 这过程中会有画面裁剪
+
+其中: 变换由 GPU 硬件执行，不处理 YUV 数据，几乎不占 CPU
+``mTextureView.setTransform(matrix);``
+
+**3) 打开相机**
+
+打开相机时机: 
+需要等待TextureView纹理可用后才 openCamera
+取决于: **TextureView.SurfaceTextureListener**
+```java
+private final TextureView.SurfaceTextureListener mSurfaceTextureListener =
+        new TextureView.SurfaceTextureListener() {
+          @Override
+          public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
+            openCamera();
+          }
+          // onSurfaceTextureSizeChanged → configureTransform：TextureView 矩阵，校正预览方向/比例
+        };
+```
+
+打开相机:
+
+```java
+/**
+ * 创建后台线程用于 Camera2 回调处理。
+ */
+private void startBackgroundThread() {
+  mBackgroundThread = new HandlerThread("CameraBackground");
+  mBackgroundThread.start();
+  mBackgroundHandler = new Handler(mBackgroundThread.getLooper());
+}
+
+cameraManager.openCamera(mCameraId, mDeviceStateCallback, mBackgroundHandler);
+```
+1. cameraId：从cameraManager获取的CameraId, 一般来说:（后置0/前置1）。
+2. StateCallback：相机状态异步回调，接收相机打开成功、失败、断开的事件，是Camera2的核心通信接口。
+3. Handler：指定相机回调运行在后台线程，避免相机耗时操作阻塞UI主线程。
+
+**4) 如何获取数据**
+
+预览与编码**共用同一套** `CaptureSession`，但 **target 不同**：一路进 **TextureView 的 Surface**（屏幕预览），一路进 **ImageReader 的 Surface**（取 YUV 字节）。
+
+创建【预览请求构造器】 CaptureRequest.Builder 并请求预览
+```java
+// 4. 创建【预览请求构造器】，类型为预览模式 TEMPLATE_PREVIEW
+mPreviewRequestBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+
+// 5. 设置自动对焦模式：连续图片对焦（相机预览最常用）
+mPreviewRequestBuilder.set(
+  CaptureRequest.CONTROL_AF_MODE,
+  CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+```
+
+将数据源给到需要的地方: TextureView(显示) + ImageReader(数据回调)
+
+TextureView(显示)
+```java
+// 0. UI获取 TextureView
+texturePreview = findViewById(R.id.texturePreview);
+// 1. 从 TextureView 获取 SurfaceTexture（GPU纹理载体）
+SurfaceTexture texture = mTextureView.getSurfaceTexture();
+// 2. 设置纹理缓冲区大小 = 相机预览分辨率（必须匹配，否则画面变形）
+texture.setDefaultBufferSize(mPreviewSize.getWidth(), mPreviewSize.getHeight());
+
+// 3. 通过 SurfaceTexture 创建 Surface（相机输出的渲染目标）
+Surface surface = new Surface(texture);
+// 6. 添加第一个输出目标：Surface → 渲染到 TextureView 给人看
+mPreviewRequestBuilder.addTarget(surface);
+```
+
+ImageReader(数据回调)
+- 宽度 + 高度: 分辨率
+- 数据格式：ImageFormat.YUV_420_888 Android的标准格式
+  - YUV：亮度 + 色度（视频编码专用）
+  - 420：色度二次采样（压缩率高、体积小）
+  - 888：每个通道 8 位
+- maxImages = 2: 内部缓冲区最多缓存 2 帧图像
+```java
+// 创建 ImageReader 实例：相机原始数据获取器（推流/编码专用）
+ImageReader mImageReader = ImageReader.newInstance(
+                mPreviewSize.getWidth(),    // 参数1：图像宽度（和预览分辨率一致）
+                mPreviewSize.getHeight(),   // 参数2：图像高度（和预览分辨率一致）
+                ImageFormat.YUV_420_888,    // 参数3：图像数据格式（安卓标准YUV）
+                2                           // 参数4：缓冲区最大帧数（2~3帧最稳定）
+        );
+// 创建 ImageReader 帧可用监听器
+mImageReader.setOnImageAvailableListener(new OnImageAvailableListenerImpl(), mBackgroundHandler);
+// 7. 添加第二个输出目标：ImageReader → 获取YUV原始数据给推流/编码用
+mPreviewRequestBuilder.addTarget(mImageReader.getSurface());
+```
+
+创建相机捕获会话
+```java
+// 8. 创建相机捕获会话（Camera2 真正开始预览的关键）
+// 传入两个输出目标：预览显示 + 数据采集
+// mCaptureStateCallback：会话状态回调
+// mBackgroundHandler：在后台线程执行，不卡UI
+mCameraDevice.createCaptureSession(
+        Arrays.asList(surface, mImageReader.getSurface()),
+        mCaptureStateCallback,
+        mBackgroundHandler);
+
+// Camera2Helper：会话就绪后连续请求 PREVIEW 帧
+        mCaptureSession.setRepeatingRequest(
+        mPreviewRequestBuilder.build(),
+        new CameraCaptureSession.CaptureCallback() { },
+mBackgroundHandler);
+```
+
+**5) YUV数据处理**
+
+- Camera2 使用 `ImageReader`，格式为 **`ImageFormat.YUV_420_888`**（Android 抽象 YUV420，三平面布局随设备可能不同）。
+- `ImageReader.OnImageAvailableListener` 获取数据: `Image image = reader.acquireNextImage();` 获取一帧图像
+- 后台线程 `CameraBackground` 上执行 `OnImageAvailableListener`，避免阻塞主线程。
+
+* 为什么转换数据?
+- ImageReader 拿到 Android 专用的 YUV_420_888 数据
+- `YUV_420_888` 的 U/V 平面可能 **交错（类似 NV21/NV12）** 或 **独立平面**，且存在 **rowStride / pixelStride**。项目里用双重循环按 stride 把 UV 填进连续缓冲区，得到上层可用的 **I420 风格** 布局：
+- 推流/编码需要用的 I420(YUV420P) 数据 
+- 根据屏幕方向旋转画面 → 交给推流引擎
+代码参考: ``public void onImageAvailable(ImageReader reader)``
+
+* 旋转（YUV420pRotate）算不算矩阵变换？吃不吃 CPU？
 - `configureTransform` 里对 **TextureView** 使用的是 **`Matrix`（二维仿射变换）**，用于 **预览画面** 与屏幕方向对齐，主要影响 GPU 纹理映射，**不等于对整帧 YUV 做线性代数矩阵乘法**。
 - 对 **编码用 YUV** 的旋转在 `YuvUtil.YUV420pRotate90/180`：本质是 **像素重排**，复杂度约 **O(宽×高)**，**确实消耗 CPU**；仅在 `rotateDegree` 为 90°/180° 时走这段路径。
 
-**是否有必要？**
-
+* 是否有必要？
 - 若编码器、显示器与 Sensor 方向不一致，不旋转会导致 **画面横竖颠倒或 sideways**，且 x264 输入平面与「所见」不一致。
 - 优化方向：**降低预览分辨率、减少旋转频率、换用支持横向输出的采集尺寸、或改为在 GPU/OEM 支持的路径处理**（需更大改动）。硬编码器也可结合 **旋转元数据**（若全流程支持），本项目走 CPU 旋转以保证与现有 x264 输入一致。
 
-**4) YUV 是通用格式吗？嵌入式是否都是 YUV？**
-
+* YUV 是通用格式吗？嵌入式是否都是 YUV？
 - **相机传感器**常见输出为 **Bayer RAW** 或经 ISP 处理后的 **YUV/RGB**；Android Camera2 对应用暴露 **`YUV_420_888`** 或 **JPEG** 等。
 - **不是全世界都是 YUV**：HDMI、部分管线可能是 RGB；但 **视频编码器标准输入多为 YUV420**（人眼对亮度敏感，色度可下采样），故 **ISP → YUV → 编码** 是移动端极常见路径。
 - **嵌入式/Linux V4L2** 常见 `YUYV`、`NV12`、`MJPEG` 等，需按设备与驱动逐个适配。
 
-**5) JNI 层 `camera_type`（NV21 vs I420）**
-
+* JNI 层 `camera_type`（NV21 vs I420）是什么?
 `VideoStream::encodeVideo` 中：
-
 - `camera_type == 1`：按 **NV21**（V 在前的交错 UV）拆成 I420 三平面。  
 - `camera_type == 2`：已是 **I420/YV12** 平面，直接 `memcpy`。
 
 两者差异在 **色度平面排列与 UV 顺序**，必须分支处理，否则会偏色或花屏。
 
----
+但是代码中实际使用的是`livePusherBridge.pushVideoFrame(yuvData, LiveFrameFormat.I420);`实际上的2: I420, 是可以直接拷贝的.
 
-### Android Camera预览
+#### Android Camera预览
 
 **1) YUV 回调与屏幕预览是两条路**
 
@@ -152,34 +321,116 @@ for (int j = 0; j < height / 2; j++) {
 
 **2) TextureView vs SurfaceView**
 
-| 对比项 | TextureView | SurfaceView |
-|--------|-------------|-------------|
-| 所在层级 | 普通 View 层级，可 **平移/缩放/旋转/透明度** | 独立 **Surface**，默认在普通 View **下方** |
-| 与 UI 合成 | 易与动画、Material 混排 | 分层复杂，覆盖对话框需注意 |
-| 性能 | 多一层 **Texture**，略增开销 | 传统上 **零拷贝** 直显更省（双缓冲 Surface） |
-| 截图/录屏 | 与其他 View 一致较好处理 | 取决于版本与合成 |
+| 对比项                | SurfaceView                                      | TextureView                                          |
+|-----------------------|--------------------------------------------------|------------------------------------------------------|
+| 底层渲染原理          | 拥有**独立Surface、独立渲染图层**，脱离View树绘制；单独Surface缓冲区，由系统直接合成到屏幕，不参与主线程View绘制流程。 | 继承自View，**纳入标准View树层级**；基于SurfaceTexture，渲染走GPU纹理管线，和普通View一起窗口合成。 |
+| 渲染线程              | 自带**独立渲染线程**，不卡UI主线程                | 依附UI主线程渲染调度，硬件加速下GPU合成               |
+| 性能延迟              | 性能更高、渲染延迟更低、CPU/GPU占用更少           | 性能略低一丢丢，多一层View树合成；现代硬件差距可忽略 |
+| 矩阵变换Matrix        | 不支持 setTransform，无法做旋转/缩放/居中纹理变换 | 原生支持 Matrix 矩阵变换，可任意旋转、缩放、居中、裁剪、镜像 |
+| UI层级关系            | 独立顶层/底层窗口，**不遵守View层级**，无法叠加普通控件、无法嵌套布局 | 完全遵守View层级，可嵌套布局、叠加UI、设置圆角、做动画、透明度渐变 |
+| 屏幕旋转适配          | 无矩阵支持，需手动计算角度、裁剪适配，开发成本高  | 配合configureTransform矩阵自动校正画面方向、全屏适配、自动处理90/180/270旋转 |
+| 页面切换/弹窗表现     | 独立Surface生命周期不同步，易黑屏、闪烁、穿透     | 跟随Activity/View生命周期，页面切换、弹窗无闪烁黑屏    |
+| 画面裁剪与全屏适配    | 难以实现无黑边全屏等比例预览                      | 支持FILL/FIT模式，轻松实现全屏无黑边、自动裁剪边缘画面 |
+| 相机预览适配难度      | 难度大，画面易倒立、旋转90度、拉伸变形             | 难度低，矩阵一键校正方向与比例                       |
+| 适用场景              | 1. 游戏、短视频播放器；<br>2. 纯全屏无UI直播推流；<br>3. 低延迟硬解码播放；<br>4. 不需要UI叠加、不需要画面旋转适配的场景 | 1. 相机预览（Camera1/Camera2）；<br>2. 需要UI叠加、带控制按钮的直播；<br>3. 横竖屏自动适配、需要画面旋转缩放；<br>4. 布局嵌套、圆角预览、动画特效场景 |
+
+SurfaceView：独立Surface独立图层，绕开View树，性能强、延迟低，但UI层级差、不支持矩阵变换，相机预览适配极麻烦。
+TextureView：融入View树+SurfaceTexture GPU纹理渲染，支持矩阵任意变换、UI层级自由叠加，开发适配简单，现代硬件性能损耗可忽略。
 
 **哪个性能更好？** 纯全屏相机预览、追求极限帧率时 **SurfaceView（或 Surface）更常见**；需要 **与界面动画深度混排** 时 **TextureView 更合适**。本项目 `Camera2Helper` **写死 `TextureView`**（Builder 校验 `previewOn(textureView)`），与 RK3588 文档里「预览依赖 TextureView」一致。
 
 **能否改成 SurfaceView？** 可以：需把 `SurfaceTexture` 换成 **`SurfaceHolder.getSurface()`**，并调整 **生命周期与旋转**；你要求不改代码，此处仅作说明。
 
-**代码锚点（纹理就绪再开相机）**
+
+##### 视频核心代码摘录
 
 ```java
-// TextureView.SurfaceTextureListener：纹理可用后才 openCamera
+/**
+ * 初始化 Camera2 预览组件（仅初始化一次）。
+ */
+private void initCameraPreview() {
+  if (camera2Helper != null) {
+    return;
+  }
+  // 获取当前的手机旋转情况
+  int rotation = getWindowManager().getDefaultDisplay().getRotation();
+  camera2Helper = new Camera2Helper.Builder()
+          .context(getApplicationContext())                // 绑定上下文
+          .cameraListener(this)                             // 相机数据回调（接收预览/图像数据）
+          .previewOn(texturePreview)                       // 指定用于预览显示的 TextureView
+          .previewViewSize(new Point(640, 480))             // 设置相机预览分辨率 640x480
+          .specificCameraId(Camera2Helper.CAMERA_ID_BACK)  // 指定使用后置摄像头
+          .rotation(rotation)                              // 传入屏幕旋转方向，用于画面校正
+          .rotateDegree(getPreviewDegree(rotation))        // 计算并设置相机最终需要旋转的角度
+          .build();                                        // 创建并启动相机
+  Log.i(TAG, "initCameraPreview, rotation=" + rotation);
+  camera2Helper.start();
+  updateStatus("相机初始化中");
+}
+
+/**
+ * Camera2 采集回调接口：
+ * 把相机生命周期和 YUV 预览帧回调给上层页面。
+ */
+public interface Camera2Listener {
+  /**
+   * 相机打开回调。
+   *
+   * @param previewSize        相机输出尺寸
+   * @param displayOrientation 预览方向
+   */
+  void onCameraOpened(Size previewSize, int displayOrientation);
+
+  /**
+   * 预览帧回调，输出 I420 数据。
+   *
+   * @param yuvData I420 帧数据
+   */
+  void onPreviewFrame(byte[] yuvData);
+
+  /**
+   * 相机关闭回调。
+   */
+  void onCameraClosed();
+
+  /**
+   * 相机异常回调。
+   *
+   * @param e 异常对象
+   */
+  void onCameraError(Exception e);
+}
+
+/**
+ * Camera2 帧回调：相机回调 I420 → 仅推流时送入 SDK（经 JNI 到 x264/RTMP）
+ *
+ * @param yuvData I420 视频帧
+ */
 @Override
-public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
-    openCamera();
+public void onPreviewFrame(byte[] yuvData) {
+  if (!pushing || livePusherBridge == null) {
+    return;
+  }
+  livePusherBridge.pushVideoFrame(yuvData, LiveFrameFormat.I420);
+}
+
+/**
+ * 开始推流
+ * <p>
+ * 视频流是onPreviewFrame一直往JNI层丢的, 此处只不过是开始将数据处理推送到网络
+ */
+private void startLivePush() {
+    // ... 校验 previewSize、URL ...
+    LivePushConfig config = new LivePushConfig(width, height, VIDEO_BITRATE, VIDEO_FRAME_RATE,
+            AUDIO_SAMPLE_RATE, AUDIO_CHANNELS);
+    livePusherBridge = new LivePusherBridge(config, this);
+    livePusherBridge.startPush(liveUrl.trim());
+    audioCaptureTask = new AudioCaptureTask(livePusherBridge);
+    audioCaptureTask.start();
+    pushing = true;
 }
 ```
 
-```java
-// 预览会话：同时绑定预览 Surface 与 ImageReader
-mPreviewRequestBuilder.addTarget(surface);
-mPreviewRequestBuilder.addTarget(mImageReader.getSurface());
-```
-
----
 
 ### 编解码
 
