@@ -11,17 +11,9 @@
 
 ---
 
-## 大体介绍
+## 目录
 
-* Android音频、视频采集
-* Android Camera预览（TextureView与SurfaceView）
-* 实时视频流YUV数据编码H.264
-* RTMP实时推流
-* RTMP拉流并Media3Player实时播放
-* FFmpeg + RTSP文件推流
-* FFmpeg采集视频数据（基本信息，抽帧）
-* FFmpeg转码：m3u8 <-> mp4 转码
-* 在线HLS视频播放
+
 
 
 ## 知识梳理
@@ -1799,6 +1791,493 @@ flowchart LR
 ### RTSP文件推流
 
 RTMP实时推流是需要控制GOP, IBP帧的, 而RTSP推流则沿用文件的IBP帧, 不做自定义修改.
+
+#### 数据流和逻辑
+
+数据流通信图：
+```mermaid
+flowchart TD
+  subgraph RTMP_RTSP_Common["🔵 RTMP 和 RTSP 相同流程"]
+    A["<b>Java 层</b><br/>LiveRtspFilePushDemoActivity<br/>inputPath / outputUrl"]
+    A --> B["FFmpegPushBridge.pushStreamAsync"]
+    B --> C["<b>JNI</b><br/>nativePushStream"]
+    C --> D["<b>open</b>"]
+    D --> D1["avformat_open_input<br/>打开输入文件/流"]
+    D1 --> D2["avformat_find_stream_info<br/>探测流信息"]
+    D2 --> D3["avformat_alloc_output_context2<br/>创建输出上下文"]
+    D3 --> D4["avcodec_parameters_copy<br/>复制编码参数，不重编码"]
+    D4 --> D5["write_header<br/>写输出头"]
+
+    D5 --> E["<b>push 推流循环</b>"]
+    E --> E1["av_read_frame<br/>读取 AVPacket"]
+    E1 --> E2["过滤：只保留音视频流"]
+    E2 --> E3["PTS/DTS 归一化<br/>时间戳从0开始"]
+    E3 --> E4["rescale time_base<br/>时基转换"]
+    E4 --> E5["av_interleaved_write_frame<br/>交错写入"]
+    E5 -->|循环| E1
+
+    E --> F["<b>close</b><br/>write_trailer + 释放上下文"]
+    F --> G["JNI 返回 resultCode"]
+    G --> H["Java 主线程回调 onCompleted"]
+  end
+
+  subgraph RTSP_Only["🟠 RTSP 独有配置"]
+    D_RTSP["检测 outputUrl 为 rtsp://"]
+    D_RTSP --> D_RTSP1["av_dict_set: rtsp_transport=tcp<br/>TCP 传输，防丢包"]
+    D_RTSP1 --> D_RTSP2["av_dict_set: muxdelay=0.1<br/>平滑发送，减少突发"]
+  end
+
+  subgraph RTMP_Only["🟢 RTMP 独有配置"]
+    D_RTMP["检测 outputUrl 为 rtmp://"]
+    D_RTMP --> D_RTMP1["默认 UDP/TCP 混合<br/>AVFMT_NOFILE 标志位"]
+    D_RTMP1 --> D_RTMP2["flv muxer<br/>封装为 FLV Tag"]
+  end
+
+  subgraph Preview["📺 本地预览链路"]
+    P["videoPreview.setVideoPath"]
+    P --> Q["VideoView/MediaPlayer<br/>解封装 + 解码"]
+    Q --> R["Surface 渲染显示"]
+  end
+
+  D3 --> D_RTSP
+  D3 --> D_RTMP
+  D_RTSP2 --> D5
+  D_RTMP2 --> D5
+  A --> P
+
+%% 样式
+  style RTMP_RTSP_Common fill:#e3f2fd,stroke:#1565c0
+  style RTSP_Only fill:#fff3e0,stroke:#ef6c00
+  style RTMP_Only fill:#e8f5e9,stroke:#2e7d32
+  style Preview fill:#f3e5f5,stroke:#7b1fa2
+```
+
+逻辑活动图
+```mermaid
+flowchart TD
+  S["<b>开始</b><br/>点击"开始文件推流""] --> T["校验 inputPath / outputUrl"]
+T --> U{"outputUrl 协议?"}
+U -->|"rtsp://"| V_rtsp["RTSP 推流<br/>pushStreamAsync"]
+U -->|"rtmp://"| V_rtmp["RTMP 推流<br/>pushStreamAsync"]
+U -->|"其他"| W["报错 / 返回"]
+
+V_rtsp --> X["JNI nativePushStream"]
+V_rtmp --> X
+
+X --> Y["<b>open(input, output)</b>"]
+
+Y --> Z["avformat_open_input<br/>打开输入文件/流"]
+Z --> Z0["avformat_find_stream_info<br/>探测流信息"]
+
+Z0 --> Z1["avformat_alloc_output_context2<br/>创建输出上下文"]
+Z1 --> Z2["遍历 nb_streams<br/>avcodec_parameters_copy<br/>参数复制，不重编码"]
+
+Z2 --> Z3{"输出协议?"}
+
+subgraph RTSP_Branch["🟠 RTSP 分支"]
+Z3_rtsp["rtsp://"] --> Z4["av_dict_set:<br/>rtsp_transport=tcp<br/>muxdelay=0.1"]
+Z4 --> Z5_rtsp["rtsp muxer<br/>封装为 RTP 包"]
+end
+
+subgraph RTMP_Branch["🟢 RTMP 分支"]
+Z3_rtmp["rtmp://"] --> Z5_rtmp["flv muxer<br/>封装为 FLV Tag"]
+end
+
+Z3 --> Z3_rtsp
+Z3 --> Z3_rtmp
+
+Z5_rtsp --> Z6["avformat_write_header<br/>写输出头"]
+Z5_rtmp --> Z6
+
+Z6 --> A1["<b>push 推流循环</b>"]
+
+A1 --> A2["av_read_frame<br/>读取 AVPacket"]
+A2 --> A3{"音视频包?"}
+A3 -->|"否"| A2
+A3 -->|"是"| A4["PTS/DTS 归一化<br/>时间戳从0开始"]
+A4 --> A4a["节拍等待<br/>推流速度控制"]
+A4a --> A4b["rescale time_base<br/>时基转换"]
+A4b --> A5["av_interleaved_write_frame<br/>交错写入输出流"]
+A5 --> A2
+
+A2 -->|"EOF / 错误"| A6["<b>close</b><br/>av_write_trailer<br/>avio_closep<br/>释放上下文"]
+
+A6 --> A7["JNI 返回 resultCode"]
+A7 --> A8["Java 主线程回调<br/>onCompleted"]
+A8 --> E["<b>结束</b>"]
+
+%% 样式
+style S fill:#37474f,stroke:#263238,color:#fff
+style E fill:#37474f,stroke:#263238,color:#fff
+style W fill:#ffcdd2,stroke:#c62828,color:#000
+
+style V_rtsp fill:#ede7f6,stroke:#7b1fa2,color:#000
+style V_rtmp fill:#ede7f6,stroke:#7b1fa2,color:#000
+style X fill:#ede7f6,stroke:#7b1fa2,color:#000
+
+style Y fill:#e3f2fd,stroke:#1565c0,color:#000
+style Z fill:#e3f2fd,stroke:#1565c0,color:#000
+style Z0 fill:#e3f2fd,stroke:#1565c0,color:#000
+style Z1 fill:#e3f2fd,stroke:#1565c0,color:#000
+style Z2 fill:#e3f2fd,stroke:#1565c0,color:#000
+style Z6 fill:#e3f2fd,stroke:#1565c0,color:#000
+
+style RTSP_Branch fill:#fff3e0,stroke:#ef6c00
+style RTMP_Branch fill:#e8f5e9,stroke:#2e7d32
+
+style Z4 fill:#ffe0b2,stroke:#ef6c00,color:#000
+style Z5_rtsp fill:#ffcc80,stroke:#ef6c00,color:#000
+style Z5_rtmp fill:#c8e6c9,stroke:#2e7d32,color:#000
+
+style A1 fill:#e1f5fe,stroke:#0277bd,color:#000
+style A2 fill:#e1f5fe,stroke:#0277bd,color:#000
+style A4 fill:#e1f5fe,stroke:#0277bd,color:#000
+style A5 fill:#e1f5fe,stroke:#0277bd,color:#000
+style A6 fill:#e3f2fd,stroke:#1565c0,color:#000
+style A7 fill:#ede7f6,stroke:#7b1fa2,color:#000
+style A8 fill:#f3e5f5,stroke:#7b1fa2,color:#000
+```
+
+**1)本地预览**
+
+```java
+// 预览view
+private VideoView videoPreview;
+/**
+ * 绑定预览源
+ * @param path  源文件路径
+ */
+private void attachPreviewSource(String path) {
+    // 绑定源
+    videoPreview.setVideoPath(path);
+    // 准备好播放了
+    videoPreview.setOnPreparedListener(mediaPlayer -> {
+    });
+}
+```
+其中：`public void setOnPreparedListener(MediaPlayer.OnPreparedListener l)`的`OnPreparedListener`
+提供接口回调：`void onPrepared(MediaPlayer mp);`
+VideoView 只是界面壳子，MediaPlayer 是里面真正干活的引擎。
+MediaPlayer 是 Android 系统的音视频播放核心引擎，主要功能：
+- 播放：`start()`
+- 暂停：`pause()`
+- 停止：`stop()`
+- 重置：`reset()`
+- 释放资源：`release()`
+- 拖动进度：`seekTo(int msec)`
+- 获取总时长：`getDuration()`
+- 获取当前进度：`getCurrentPosition()`
+- 设置音量：`setVolume(float leftVolume, float rightVolume)`
+- 准备完成：`onPrepared(MediaPlayer mp)`
+- 播放完成：`onCompletion(MediaPlayer mp)`
+- 拖动完成：`onSeekComplete(MediaPlayer mp)`
+- 播放错误：`onError(MediaPlayer mp, int what, int extra)`
+- 缓冲更新：`onBufferingUpdate(MediaPlayer mp, int percent)`
+
+**2)推流**
+
+FFmpeg 核心库功能说明：
+- libavformat：封装与解封装，处理 MP4、FLV、HLS、RTMP、RTSP 等文件格式与协议
+- libavcodec：音视频编解码，H.264、H.265、AAC 等编码和解码
+- libavutil：通用工具库，提供日志、错误处理、内存管理、时间戳、数学运算
+- libswresample：音频重采样，改变采样率、声道数、位深格式转换
+- libswscale：视频图像转换，缩放、裁剪、颜色空间转换（如 YUV → RGB）
+
+
+* 推流数据结构
+```c++
+/**
+ * FFmpeg 文件转推器：
+ * - 打开输入媒体；
+ * - 初始化 RTMP(FLV)/RTSP 输出；
+ * - 循环转推音视频包。
+ */
+class FFRtmpPusher {
+private:
+    AVFormatContext *inFormatCtx = nullptr;  /**< 输入容器：open_input / read_frame */
+    AVFormatContext *outFormatCtx = nullptr; /**< 输出容器：write_header / interleaved_write_frame */
+    AVDictionary *muxerOptions = nullptr;   /**< write_header 可选参数：如 RTSP 走 TCP */
+
+    AVPacket packet;      /**< 栈上复用：每次 av_read_frame 填充，写完 write_frame 后 unref */
+    int video_index = -1; /**< 选中的视频轨 stream_index；-1 表示无视频或未发现 */
+    int audio_index = -1; /**< 选中的首条音频轨；其余音轨在 push 中丢弃 */
+
+public:
+    /** 打开输入、创建输出轨、写头部；失败返回 libav 负错误码 */
+    int open(const char *inputPath, const char *outputPath);
+
+    /** 读帧、时间戳修正、按媒体时钟节拍 sleep、写入输出；读完返回 0 或错误码 */
+    int push();
+
+    /** 写尾部、关闭 IO、释放上下文 */
+    void close();
+};
+```
+
+初始化推流RTSP
+```c++
+auto *rtmpPusher = new FFRtmpPusher();
+ret = rtmpPusher->open(input_path, output_path);
+
+/**
+ * @brief 打开输入文件/URL，创建输出上下文并 write_header。
+ */
+int FFRtmpPusher::open(const char *inputPath, const char *outputPath) {
+  // 初始化 Socket，允许 http/rtmp/rtsp 等网络协议
+  avformat_network_init(); 
+  // 探测容器头，建立输入上下文
+  ret = avformat_open_input(&inFormatCtx, inputPath, nullptr, nullptr); 
+  // 解析流、解码器参数、时长等元数据
+  avformat_find_stream_info(inFormatCtx, nullptr); 
+  
+  // 创建输出 muxer
+  const char *format_name = detect_output_format(outputPath);
+  ret = avformat_alloc_output_context2(&outFormatCtx, nullptr, format_name, outputPath);
+  
+  
+  // 遍历输入文件的所有流（视频流、音频流、字幕流等）
+  for (int i = 0; i < inFormatCtx->nb_streams; ++i) {
+      // 获取当前输入流
+      AVStream *in_stream = inFormatCtx->streams[i];
+
+      // 根据输入流的编码ID查找对应的编码器
+      // 注意：纯封装转换(remux)场景下，这里仅需要一个编码器占位，不实际执行编码
+      const auto *codec = avcodec_find_encoder(in_stream->codecpar->codec_id);
+
+      // 为输出的媒体文件创建一个新的流，与输入流对应
+      AVStream *out_stream = avformat_new_stream(outFormatCtx, codec);
+
+      // 关键：直接拷贝编码参数，不进行重新编码，保证速度最快
+      avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
+
+      // 设置编码标签为0，让输出封装器自动生成合适的格式标识(FourCC)
+      out_stream->codecpar->codec_tag = 0;
+
+      // 判断当前流类型：视频流
+      if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+          // 记录视频流索引，采用覆盖策略：仅保留最后一个视频流（常规视频文件只有一条）
+          video_index = i;
+      }
+      // 判断当前流类型：音频流
+      else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+          // 只记录第一条音频流索引，忽略多音轨文件中的其他音轨（如解说、伴奏）
+          if (audio_index == -1) {
+              audio_index = i;
+          }
+      }
+  }
+  
+  // 判断输出格式是否需要关联文件
+  // 有些格式(如RTSP)是纯网络流，不需要文件IO
+  if (!(outFormatCtx->oformat->flags & AVFMT_NOFILE)) {
+      // 打开输出文件/网络IO上下文，用于写入媒体数据
+      ret = avio_open2(&outFormatCtx->pb, outputPath, AVIO_FLAG_WRITE, nullptr, nullptr);
+      if (ret < 0) {
+          return ret;
+      }
+  }
+  
+  // 判断是否为RTSP推流输出，进行专属配置
+  if (is_rtsp_output(outputPath)) {
+      // RTSP 推流优先使用TCP传输，相比UDP更稳定，避免弱网丢包导致播放异常
+      av_dict_set(&muxerOptions, "rtsp_transport", "tcp", 0);
+      // 设置最小推流延迟，平滑RTP数据包发送，减少网络突发卡顿
+      av_dict_set(&muxerOptions, "muxdelay", "0.1", 0);
+  }
+  
+    // 写入媒体文件头信息（包含编码格式、流信息、SDP、FLV Header等）
+    ret = avformat_write_header(outFormatCtx, &muxerOptions);
+
+    // 释放参数字典，防止内存泄漏
+    // avformat_write_header可能已内部清空，此处再次释放保证安全
+    av_dict_free(&muxerOptions);
+```
+
+推流
+```c++
+/**
+ * @brief 循环读取音视频压缩包 AVPacket，根据媒体时间戳进行同步休眠，再交错写入输出（RTMP/RTSP/HLS）
+ * @return 成功返回0，失败返回错误码
+ */
+int FFRtmpPusher::push() {
+    // 返回值初始化
+    int ret = 0;
+    // 记录推流开始的系统时间（微秒），用于控制推流速度，实现实时同步
+    int64_t startTime = av_gettime();
+    // 保存每个流的第一个PTS，用于将时间戳归零，从0开始
+    std::vector<int64_t> firstPts(inFormatCtx->nb_streams, AV_NOPTS_VALUE);
+    // 保存每个流的第一个DTS，用于将时间戳归零
+    std::vector<int64_t> firstDts(inFormatCtx->nb_streams, AV_NOPTS_VALUE);
+    // 保存上一次输出的DTS，用于保证DTS单调递增，防止推流出错
+    std::vector<int64_t> lastOutDts(inFormatCtx->nb_streams, AV_NOPTS_VALUE);
+    FFLOGI("push start");
+
+    // 循环读取音视频数据包，直到文件结束或出错
+    while (true) {
+        // 从输入文件/流中读取一个音视频压缩包
+        ret = av_read_frame(inFormatCtx, &packet);
+        // 读取失败
+        if (ret < 0) {
+            // 文件读取完毕，正常结束
+            if (ret == AVERROR_EOF) {
+                FFLOGI("av_read_frame EOF, treat as normal finish");
+                ret = 0;
+            } else {
+                // 读取发生错误
+                FFLOGE("av_read_frame err=%d", ret);
+            }
+            break;
+        }
+
+        // 过滤：只保留之前选定的视频轨和音频轨，其他流（字幕等）直接丢弃
+        if (packet.stream_index != video_index && packet.stream_index != audio_index) {
+            // 释放数据包资源
+            av_packet_unref(&packet);
+            continue;
+        }
+
+        // 当前数据包所属的流索引
+        int streamIndex = packet.stream_index;
+        // 获取该流的时间基，用于时间戳换算
+        AVRational time_base = inFormatCtx->streams[packet.stream_index]->time_base;
+
+        // ===================== 时间戳归一化（从0开始）=====================
+        // 处理PTS（显示时间戳）
+        if (packet.pts != AV_NOPTS_VALUE) {
+            // 记录第一个PTS，作为基准0点
+            if (firstPts[streamIndex] == AV_NOPTS_VALUE) {
+                firstPts[streamIndex] = packet.pts;
+            }
+            // 时间戳减去基准值，实现从0开始
+            packet.pts -= firstPts[streamIndex];
+            // 防止时间戳为负数
+            if (packet.pts < 0) {
+                packet.pts = 0;
+            }
+        }
+        // 处理DTS（解码时间戳）
+        if (packet.dts != AV_NOPTS_VALUE) {
+            // 记录第一个DTS，作为基准0点
+            if (firstDts[streamIndex] == AV_NOPTS_VALUE) {
+                firstDts[streamIndex] = packet.dts;
+            }
+            // 时间戳减去基准值
+            packet.dts -= firstDts[streamIndex];
+            // 防止时间戳为负数
+            if (packet.dts < 0) {
+                packet.dts = 0;
+            }
+        }
+
+        // 保证 PTS >= DTS，避免编码器/播放器报错
+        if (packet.pts != AV_NOPTS_VALUE
+            && packet.dts != AV_NOPTS_VALUE
+            && packet.pts < packet.dts) {
+            packet.pts = packet.dts;
+        }
+
+        // ===================== 实时推流速度控制（同步休眠）=====================
+        // 用于同步的时间戳，优先使用DTS
+        int64_t syncTs = packet.dts != AV_NOPTS_VALUE ? packet.dts : packet.pts;
+        if (syncTs != AV_NOPTS_VALUE) {
+            // 将媒体时间戳转换为微秒（真实时间）
+            int64_t mediaTimeUs = av_rescale_q(syncTs, time_base, AV_TIME_BASE_Q);
+            // 已经过去的系统时间
+            int64_t elapsedUs = av_gettime() - startTime;
+            // 计算需要休眠的时间，控制推流速度和播放速度一致
+            int64_t waitUs = mediaTimeUs - elapsedUs;
+
+            // 需要等待，防止推流过快
+            if (waitUs > 0) {
+                // 最大休眠200ms，避免连接超时断开
+                if (waitUs > 200000) {
+                    waitUs = 200000;
+                }
+                // 休眠等待，实现实时推流
+                av_usleep(static_cast<unsigned int>(waitUs));
+            }
+        }
+
+        // ===================== 时间戳单位转换 =====================
+        // 将数据包的时间戳从输入流的时间基，转换为输出流的时间基
+        rescale(inFormatCtx, outFormatCtx, &packet);
+
+        // ===================== DTS 单调递增校验 =====================
+        if (packet.dts != AV_NOPTS_VALUE) {
+            // 如果当前DTS小于等于上一个DTS，强制+1，保证严格递增
+            if (lastOutDts[streamIndex] != AV_NOPTS_VALUE
+                && packet.dts <= lastOutDts[streamIndex]) {
+                packet.dts = lastOutDts[streamIndex] + 1;
+                // 同时保证PTS不小于DTS
+                if (packet.pts != AV_NOPTS_VALUE && packet.pts < packet.dts) {
+                    packet.pts = packet.dts;
+                }
+            }
+            // 更新最后输出的DTS
+            lastOutDts[streamIndex] = packet.dts;
+        }
+
+        // ===================== 写入输出流 =====================
+        // 交错写入音视频包，自动维持音视频顺序，适合推流
+        ret = av_interleaved_write_frame(outFormatCtx, &packet);
+        if (ret < 0) {
+            FFLOGE("write frame err=%d", ret);
+            // 释放资源
+            av_packet_unref(&packet);
+            break;
+        }
+
+        // 释放当前数据包，避免内存泄漏
+        av_packet_unref(&packet);
+    }
+
+    FFLOGI("push finish, ret=%d", ret);
+    return ret;
+}
+```
+
+
+结束推流：
+```c++
+/**
+ * @brief 写文件尾部信息，关闭输出IO，释放输入/输出上下文
+ * 负责推流/封装结束后的资源清理，防止内存泄漏
+ */
+void FFRtmpPusher::close() {
+    // 打印关闭日志
+    FFLOGI("close");
+
+    // 释放推流参数字典，防止内存泄漏
+    av_dict_free(&muxerOptions);
+
+    // ==================== 释放输出上下文 ====================
+    if (outFormatCtx) {
+        // 写入文件尾部（如索引、结束标记），MP4/FLV等格式需要
+        av_write_trailer(outFormatCtx);
+
+        // 如果输出格式需要文件IO（不是纯网络流），并且IO上下文已打开
+        if (!(outFormatCtx->oformat->flags & AVFMT_NOFILE) && outFormatCtx->pb) {
+            // 关闭并释放输出文件/网络IO上下文
+            avio_closep(&outFormatCtx->pb);
+        }
+
+        // 释放输出格式上下文（整个输出的核心结构体）
+        avformat_free_context(outFormatCtx);
+        // 指针置空，避免野指针
+        outFormatCtx = nullptr;
+    }
+
+    // ==================== 释放输入上下文 ====================
+    if (inFormatCtx) {
+        // 关闭输入流，并自动释放输入格式上下文
+        avformat_close_input(&inFormatCtx);
+        // 指针置空
+        inFormatCtx = nullptr;
+    }
+}
+```
+
+
 
 #### FFmpeg推流
 
