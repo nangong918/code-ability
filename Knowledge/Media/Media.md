@@ -1089,6 +1089,16 @@ Android **MediaCodec** 是对底层 **硬件音视频编解码器** 的统一封
 
 **1) API 形态**
 
+
+| KEY | 含义 |
+|-----|------|
+| `KEY_BIT_RATE` | 目标码率 |
+| `KEY_FRAME_RATE` | 期望帧率 |
+| `KEY_I_FRAME_INTERVAL` | GOP 大致尺度（秒） |
+| `KEY_COLOR_FORMAT` | 输入像素格式（须查询 CodecCapabilities） |
+| `KEY_BITRATE_MODE` | CBR/VBR 等 |
+| 音频 `KEY_AAC_PROFILE` | AAC 档位 |
+
 ```java
 // 创建 H.264 编码器
 MediaCodec codec = MediaCodec.createEncoderByType(MediaFormat.MIME_TYPE_VIDEO_AVC);
@@ -1117,18 +1127,7 @@ MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
 int outIx = codec.dequeueOutputBuffer(info, timeoutUs);
 ```
 
-**2) 常用 MediaFormat 键（节选）**
-
-| KEY | 含义 |
-|-----|------|
-| `KEY_BIT_RATE` | 目标码率 |
-| `KEY_FRAME_RATE` | 期望帧率 |
-| `KEY_I_FRAME_INTERVAL` | GOP 大致尺度（秒） |
-| `KEY_COLOR_FORMAT` | 输入像素格式（须查询 CodecCapabilities） |
-| `KEY_BITRATE_MODE` | CBR/VBR 等 |
-| 音频 `KEY_AAC_PROFILE` | AAC 档位 |
-
-**3) 硬编与组成原理、软编的关系**
+**2) 硬编与组成原理、软编的关系**
 
 硬件编码在 SoC 上有独立流水线，CPU 主要负责 **配置与拷缓冲**；软编 x264/FAAC 则占用大量 CPU 周期。详见 [计算机组成原理](../408/计算机组成原理.md) 中的 SoC 示意图。
 
