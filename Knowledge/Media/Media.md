@@ -535,6 +535,39 @@ gantt
     Surface / AudioTrack 输出        :ren1, 3, 10
 ```
 
+**图 B 对照代码（项目 RTMP/HLS 拉流）**
+
+```java
+// LivePullDemoActivity：RTMP/HLS 走 ExoPlayer 默认 MediaSource
+private void startPullPlay() {
+    Uri uri = Uri.parse(pullUrl);
+    if (isRtspUrl(pullUrl)) {
+        // RTSP 分支见图 D
+    } else {
+        applyRtspPlaybackPreference(false);
+        player.setMediaItem(MediaItem.fromUri(uri));
+    }
+    player.prepare();
+    player.play();
+}
+```
+
+```java
+// LivePullDemoActivity：播放状态可观察到 Buffering -> Ready（对应图里的 IO/解码/渲染阶段）
+player.addListener(new Player.Listener() {
+    @Override
+    public void onPlaybackStateChanged(int playbackState) {
+        if (playbackState == Player.STATE_BUFFERING) {
+            updateStatus("缓冲中...");
+        } else if (playbackState == Player.STATE_READY) {
+            updateStatus("播放中，直播延迟: ...");
+        }
+    }
+});
+```
+
+> 说明：图 B 是播放器通用线程模型示意；本项目业务代码不直接 new IO/解码线程，实际线程拆分由 ExoPlayer 内部管理。
+
 ---
 
 **图 C：FFmpeg 转推到 RTMP 或 RTSP（`FFmpegPushBridge.pushStream` / async）**
@@ -557,6 +590,44 @@ gantt
     Callback.onCompleted             :ui1, 14, 15
 ```
 
+**图 C 对照代码（项目 FFmpeg 单线程转推）**
+
+```java
+// FFmpegPushBridge：单线程 Executor 跑 native 全链路；结束后切主线程回调
+private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
+private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
+
+public static void pushStreamAsync(String inputPath, String outputUrl, Callback callback) {
+    EXECUTOR.execute(() -> {
+        int resultCode = pushStream(inputPath, outputUrl);
+        if (callback != null) {
+            // 此处使用main线程主要是因为UI更新需要在主线程
+            MAIN_HANDLER.post(() -> callback.onCompleted(resultCode, buildMessage(resultCode)));
+        }
+    });
+}
+```
+
+```cpp
+// ffmpeg_pusher_jni.cpp：native 同线程串行执行 open -> push -> close
+auto *rtmpPusher = new FFRtmpPusher();
+ret = rtmpPusher->open(input_path, output_path);
+if (ret >= 0) {
+    ret = rtmpPusher->push();
+}
+rtmpPusher->close();
+delete rtmpPusher;
+```
+
+```cpp
+// ff_rtmp_pusher.cpp：push() 内单循环读包并交织写包（没有额外编码线程）
+while (true) {
+    ret = av_read_frame(inFormatCtx, &packet);
+    // ... 时间戳归一化 / 节拍等待 / rescale ...
+    ret = av_interleaved_write_frame(outFormatCtx, &packet);
+}
+```
+
 ---
 
 **图 D：RTSP 拉流播放（典型；协议换为 RTSP/RTP，线程划分常类似 RTMP）**
@@ -576,6 +647,37 @@ gantt
     section 解码与渲染
     解封装负载 → 解码 → 显示/出声   :rd1, 2, 11
 ```
+
+**图 D 对照代码（项目 RTSP 拉流）**
+
+```java
+// LivePullDemoActivity：RTSP 分支显式使用 RtspMediaSource（RTP over TCP）
+if (isRtspUrl(pullUrl)) {
+    applyRtspPlaybackPreference(true);
+    RtspMediaSource mediaSource = new RtspMediaSource.Factory()
+            .setForceUseRtpTcp(true)
+            .createMediaSource(MediaItem.fromUri(uri));
+    player.setMediaSource(mediaSource);
+} else {
+    applyRtspPlaybackPreference(false);
+    player.setMediaItem(MediaItem.fromUri(uri));
+}
+player.prepare();
+player.play();
+```
+
+```java
+// 项目当前 RTSP 播放策略：关闭音频轨，复用 ExoPlayer 渲染链路
+private void applyRtspPlaybackPreference(boolean rtspMode) {
+    TrackSelectionParameters params = player.getTrackSelectionParameters()
+            .buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, rtspMode)
+            .build();
+    player.setTrackSelectionParameters(params);
+}
+```
+
+> 说明：图 D 也是教学抽象图；项目里 RTSP 的接收/解码/渲染线程由 `RtspMediaSource + ExoPlayer` 内部完成调度。
 
 
 #### 音频编码
