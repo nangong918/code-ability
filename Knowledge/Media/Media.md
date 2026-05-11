@@ -1158,25 +1158,59 @@ IBP 是 H.264/H.265 中最核心的帧间压缩机制，决定了「码率、延
 - **B 帧（Bi-predicted）**：可同时参考前后帧，压缩效率最高，但编码/解码链路更复杂，且引入重排延迟。
 
 **2) 为什么要做 IBP**
-- 纯 I 帧体积太大，直播带宽成本高、同带宽下画质差。
+- 传输的带宽存在上限, 使用压缩帧能在有限码率的情况下提高画质
+- I 帧本身是「完整帧、无参考、细节理论最干净」, 但在带宽受限 + 频繁发 I 帧 的前提下，I 帧必须被强行高压缩，所以才变模糊、马赛克重
 - 只靠 P 帧虽然省带宽，但在复杂运动场景仍不够高效。
 - B 帧可进一步压缩，但要付出更高时延和更复杂时间戳管理成本。
 
-**3) 解决了什么问题**
-- 显著降低同等画质下码率，提升弱网可用性。
-- 降低存储和 CDN 分发成本（尤其录播/HLS 场景）。
-- 提升画质稳定性（同码率下细节保留更好）。
 
-**4) 带来的新问题**
-- 帧依赖链更长，丢包后可能出现更长时间花屏/马赛克。
-- B 帧导致显示顺序与编码顺序不一致，需要 PTS/DTS 重排。
-- 实时链路（RTMP/RTC）中 B 帧会提高端到端延迟。
+带宽在相同 1000kbps 情况下:
+- B 帧数量越多，整体压缩效率越高、占用传输比特越少，能为 I 帧和 P 帧预留更多码率空间，同等带宽下整体画质更好；
+  但 B 帧采用前后双向参考，需要等待前后帧就绪才能解码渲染，帧时序需要重排，因此 B 帧越多，端到端延迟越高。
+- GOP 间隔越小（I 帧越密集），观众拉流秒开、丢包恢复越快、实时延迟越低；
+  但带宽总量有限，I 帧单帧体积远大于 P/B 帧，I 帧数量增多会抢占整体码率配额，编码器被迫压低每帧分配比特、加重压缩，最终整体画面细节丢失、画质下降。
 
-**5) 怎么选**
+
+码率对比:
+```text
+I 帧 ＞＞ P 帧 ＞ B 帧
+（1000KB）（100KB）（20KB）
+```
+
+相同码率下画质排名:
+```text
+I+P+B ＞ I+P ＞ 全I帧
+（B帧越多越清晰）
+```
+
+延迟排名:
+```text
+全I帧 ＜ I+P ＜ I+P+B
+（B帧越多延迟越高, I帧越多GOP越短, 延迟越低）
+```
+
+抗丢包排名: 
+```text
+全I帧 ＞ I+P ＞ I+P+B
+（B帧越多越容易花屏）
+```
+
+**3) 怎么选**
 - **低延迟直播（RTMP、RTC）**：通常 `I + P`（禁用 B 帧），关键帧间隔 1~2 秒。
 - **点播/HLS**：允许 `I + P + B`，换更高压缩效率。
 - **网络差/终端弱**：缩短 GOP（更频繁 I 帧），提升恢复能力，但码率会上升。
 - **网络稳/追求带宽效率**：拉长 GOP，并在可接受延迟内引入 B 帧。
+
+
+**4) 解决了什么问题**
+- 显著降低同等画质下码率，提升弱网可用性。
+- 降低存储和 CDN 分发成本（尤其录播/HLS 场景）。
+- 提升画质稳定性（同码率下细节保留更好）。
+
+**5) 带来的新问题**
+- 帧依赖链更长，丢包后可能出现更长时间花屏/马赛克。
+- B 帧导致显示顺序与编码顺序不一致，需要 PTS/DTS 重排。
+- 实时链路（RTMP/RTC）中 B 帧会提高端到端延迟。
 
 **6) 本项目中的使用方式**
 - **RTMP 实时推流（`VideoStream`）**：明确 `param.i_bframe = 0`，即只用 I/P，目标是低延迟和实现简单。
@@ -1223,22 +1257,88 @@ param.i_keyint_max = fps * 3;   // GOP 拉长，码率更省但时延更高
 
 代码摘录（项目外：根据网络波动动态调整 IBP 的策略伪代码）：
 ```java
-// 每 2s 评估一次网络质量，决定编码档位（示例）
+/**
+ * 网络质量统计回调（自适应码率核心逻辑）
+ * 每 2 秒触发一次，根据当前网络状态（带宽、RTT延迟、丢包率）动态决策编码档位
+ * 目的：弱网降低画质保证流畅，强网提升画质追求体验，实现直播自适应推流
+ *
+ * @param bitrateKbps 当前可用带宽估算值（kbps）
+ * @param rttMs 网络往返延时（ms），值越大网络越差
+ * @param lossPct 丢包率（0.08 = 8%），丢包越高画面越容易卡顿
+ */
 void onNetStat(long bitrateKbps, int rttMs, float lossPct) {
-    if (lossPct > 0.08f || rttMs > 300 || bitrateKbps < 600) {
-        // 弱网：走低延迟稳态档
-        encoderProfile = "LOW_LATENCY";
-        // I/P only, 较短 GOP, 降分辨率/帧率/码率
-        applyProfile(640, 360, 12, 450_000, 0, 12);
-    } else if (lossPct > 0.03f || rttMs > 180 || bitrateKbps < 1200) {
-        // 中等网络：均衡档
-        encoderProfile = "BALANCED";
-        applyProfile(960, 540, 18, 800_000, 0, 24);
-    } else {
-        // 好网络：高画质档（直播仍建议 bframe=0）
-        encoderProfile = "HIGH_QUALITY";
-        applyProfile(1280, 720, 24, 1_500_000, 0, 48);
-    }
+  // ==================== 弱网环境：丢包高/延迟高/带宽极低 ====================
+  // 策略：大幅降低分辨率、帧率、码率，缩短GOP提高抗丢包能力，禁用B帧保证最低延迟
+  if (lossPct > 0.08f || rttMs > 300 || bitrateKbps < 600) {
+    encoderProfile = "LOW_LATENCY";
+    // 配置：640x360分辨率、12帧、450kbps、无B帧、GOP=12帧（1秒一个I帧）
+    applyProfile(640, 360, 12, 450_000, 0, 12);
+  }
+
+  // ==================== 中等网络：一般网络环境 ====================
+  // 策略：平衡流畅度与画质，中等分辨率+中等码率，保证直播稳定
+  else if (lossPct > 0.03f || rttMs > 180 || bitrateKbps < 1200) {
+    encoderProfile = "BALANCED";
+    // 配置：960x540分辨率、18帧、800kbps、无B帧、GOP=24帧（约1.3秒一个I帧）
+    applyProfile(960, 540, 18, 800_000, 0, 24);
+  }
+
+  // ==================== 优良网络：带宽充足、延迟低、无丢包 ====================
+  // 策略：开启高清画质，高分辨率+高帧率+高码率，直播体验最佳
+  else {
+    encoderProfile = "HIGH_QUALITY";
+    // 配置：720P分辨率、24帧、1500kbps、无B帧、GOP=48帧（2秒一个I帧）
+    applyProfile(1280, 720, 24, 1_500_000, 0, 48);
+  }
+}
+
+
+/**
+ * 动态应用视频编码档位配置
+ * 作用：根据当前网络质量，动态修改编码器的分辨率、帧率、码率、GOP、B帧策略
+ * 用于弱网降档、强网升档，保证直播流畅不卡顿
+ * <p>
+ * 入参全部对应实时直播编码核心参数：
+ * @param width        编码输出宽度
+ * @param height       编码输出高度
+ * @param fps          编码帧率
+ * @param bitrate      目标码率（bps）
+ * @param bframeCount  B帧数量（直播固定传 0，禁用B帧）
+ * @param keyintSec    I帧间隔秒数（GOP = fps * 秒数）
+ */
+void applyProfile(int width, int height, int fps, long bitrate, int bframeCount, int keyintSec) {
+
+  // 1. 计算实际GOP大小（I帧间隔 = 帧率 × 秒数）
+  int gopSize = fps * keyintSec;
+
+  // 2. 构建/更新编码器参数（对应你项目中的 x264_param_t）
+  VideoEncParam param = new VideoEncParam();
+
+  // 基础画面配置
+  param.width        = width;         // 动态分辨率
+  param.height       = height;
+  param.fps          = fps;           // 动态帧率
+
+  // 码率控制配置
+  param.bitrate      = bitrate;       // 动态码率 bps
+  param.vbvMaxBitrate = (long)(bitrate * 1.2);  // 峰值码率
+  param.vbvBufferSize = bitrate;      // 缓冲大小
+
+  // IBP帧核心配置
+  param.bframeCount  = bframeCount;   // B帧数量（直播=0）
+  param.gopSize      = gopSize;       // I帧间隔
+
+  // 低延迟直播专用配置
+  param.lowLatencyMode = true;         // 开启零延迟
+  param.ultraFastPreset = true;        // 最快编码速度
+
+  // 3. 通知编码器重新加载配置
+  // 弱网/网络变好时，热更新编码配置，不中断推流
+  encoder.updateParameter(param);
+
+  // 4. 日志记录档位切换（便于调试/统计）
+  log.info("动态切换编码档位：分辨率={}x{} 帧率={} 码率={}kbps B帧={} GOP={}",
+          width, height, fps, bitrate / 1000, bframeCount, gopSize);
 }
 ```
 解释：直播动态调参建议优先调“分辨率/帧率/码率/GOP”，B 帧一般固定 0，减少重排延迟与复杂度。
@@ -1246,7 +1346,7 @@ void onNetStat(long bitrateKbps, int rttMs, float lossPct) {
 ```mermaid
 flowchart TD
     A[采集网络统计: RTT/丢包/可用带宽] --> B{网络等级}
-    B -->|差| C["降级: 分辨率↓ fps↓ 码率↓ GOP缩短 bframe=0"]
+    B -->|差| C["降级: 分辨率↓ fps↓ 码率↓ GOP缩短 bframe=0 (GOP缩短)"]
     B -->|中| D[均衡: 中分辨率 中码率 GOP中等 bframe=0]
     B -->|好| E["升级: 分辨率↑ fps↑ 码率↑ GOP拉长"]
     C --> F[重建/热更新编码器参数]
