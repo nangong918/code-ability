@@ -2884,13 +2884,164 @@ HLS碎片接收加载, Android用ExoPlayer播放. 4K / 10GB 电影会不会 OOM?
 
 ---
 
-### 播放原理（IBP、ExoPlayer 底层）
+### 播放原理（ExoPlayer 底层）
 
-- **编码侧**产出带 **I/P/B** 的压缩流；**解码侧**按 **DTS/PTS** 重排序后输出帧。  
-- **ExoPlayer**：`Renderer`（Video/Audio）从 `SampleQueue` 取压缩样本 → **MediaCodec** 解码 → 视频 **Surface**、音频 **AudioTrack**。  
-- **同步**：以 **音频为主时钟** 或 **独立时钟** 对齐视频（实现依版本与配置）。
+**1)IBP帧解码**
+ExoPlayer 本身不直接解析 IBP 帧，而是通过「媒体解析器（MediaParser）+ 解码器（MediaCodec）」协同完成 IBP 帧的识别、解析与解码
 
----
+**2)媒体解析器（MediaParser）**
+解析流数据格式（如 HLS 的 m3u8 索引、RTMP 的 FLV 封装、RTSP 的 RTP 包），提取音视频轨道、时间戳、编码信息（如 H.264、AAC）
+协议适配：根据流格式（如 FLV、TS、RTP 包）
+信息提取：提取音视频轨道信息（如视频编码格式、音频采样率）、每帧的 DTS/PTS 时间戳、IBP 帧类型标识
+格式标准化：将不同协议、不同封装格式的流数据，统一转换为 ExoPlayer 可识别的“样本格式”，确保后续 SampleQueue 缓存、Renderer 解码的兼容性；
+
+| 协议 | ExoPlayer 入口 | MediaParser 处理 |
+|------|----------------|------------------|
+| RTMP | RtmpMediaSource 接收 FLV Tag → 解封装 | 解析 FLV 封装，提取 H.264 NALU / AAC |
+| RTSP | RtspMediaSource 接收 RTP 包 → 解封装 | 解析 RTP 包，提取 H.264 NALU / AAC |
+| HLS  | HlsMediaSource 下载 .m3u8 → .ts 切片 | 解析 TS 容器，提取 H.264 NALU / AAC |
+
+RTMP → RtspMediaSource | RTSP → RtspMediaSource | HLS → HlsMediaSource
+
+**3)样本队列（SampleQueue）**
+缓存解析后的音视频“样本”（压缩帧），供渲染器按需读取，起到缓冲作用（应对网络抖动）；
+HLS 延迟问题（ExoPlayer 默认缓冲）: ExoPlayer 对 HLS 有默认 30 秒缓冲
+低延迟 HLS 需要：
+- 服务端：Nginx hls_fragment 缩小到 1-2s，开启预加载提示
+- 客户端：ExoPlayer setDefaultLoadControl 修改 min/max buffer
+
+**4)渲染器（Renderer）**
+分为 VideoRenderer（视频）和 AudioRenderer（音频）
+从 SampleQueue 取出压缩样本；
+调用系统 MediaCodec（硬件解码，效率高）或软件解码，将压缩帧解码为原始帧（视频：YUV 格式；音频：PCM 格式）；
+将原始帧输出到对应渲染载体：视频 → Surface（如布局中的 TextureView、SurfaceView），音频 → AudioTrack（系统音频输出）
+硬解码支持范围：
+- H.264：全平台硬解（API 16+）
+- H.265：需 API 21+，部分低端机不支持
+- B 帧：部分芯片硬解码器对 B 帧支持较差，可能导致解码失败 → 降级软解
+
+**5)DTS/PTS 时间戳实现音视频同步**
+为什么需要 DTS 和 PTS 两个时间戳？
+根本原因：B 帧的存在导致解码顺序 ≠ 播放顺序。
+假设一段视频帧序列，播放顺序（PTS）是这样的：
+- I₀：关键帧，自己就能解码
+- B₁、B₂：双向参考帧，需要参考 I₀ 和 P₃ 才能解码
+- P₃：前向参考帧，需要参考 I₀ 才能解码
+- B₄、B₅：需要参考 P₃ 和 P₆
+```text
+I₀  B₁  B₂  P₃  B₄  B₅  P₆
+```
+解码器如果要解码 B₁，必须先解码 I₀ 和 P₃。所以解码顺序必须变成：
+```text
+解码顺序(DTS): I₀  P₃  B₁  B₂  P₆  B₄  B₅
+播放顺序(PTS): I₀  B₁  B₂  P₃  B₄  B₅  P₆
+```
+- DTS（Decode Timestamp 解码时间戳）：表示该帧何时开始解码
+- PTS（Presentation Timestamp 显示时间戳）：表示该帧何时开始渲染
+
+
+```mermaid
+flowchart TD
+  subgraph PlayerControl["🎮 PlayerControl 播放控制器"]
+    direction TB
+    CTRL["统一管理播放状态<br/>播放 / 暂停 / 停止 / Seek<br/>缓冲控制 / 进度同步<br/>状态回调监听"]
+  end
+
+  subgraph Server["🌐 服务端"]
+    S1["Nginx/MediaMTX<br/>RTMP/RTSP/HLS 推流"]
+  end
+
+  subgraph MediaParser["📦 MediaParser 解析器"]
+    P1["解析协议封装<br/>FLV Tag / RTP / TS"]
+    P2["提取压缩帧<br/>H.264 NALU / AAC"]
+    P3["提取时间戳<br/>DTS + PTS"]
+    P4["格式化样本<br/>统一 Sample 格式"]
+
+    P1 --> P2 --> P3 --> P4
+  end
+
+  subgraph SampleQueue["📋 SampleQueue 样本队列"]
+    Q1["Sample {pts=0, dts=0, data=I₀}"]
+    Q2["Sample {pts=3, dts=1, data=P₃}"]
+    Q3["Sample {pts=1, dts=2, data=B₁}"]
+    Q4["Sample {pts=2, dts=3, data=B₂}"]
+  end
+
+  subgraph VideoRenderer["🎬 VideoRenderer 视频渲染器"]
+    V1["从 SampleQueue 取样本"]
+    V2["按 DTS 排序送解码<br/>I₀(0) → P₃(1) → B₁(2) → B₂(3)"]
+    V3["MediaCodec 硬解码<br/>YUV 原始帧"]
+    V4["按 PTS 排序渲染到 Surface<br/>I₀(0) → B₁(1) → B₂(2) → P₃(3)"]
+
+    V1 --> V2 --> V3 --> V4
+  end
+
+  subgraph AudioRenderer["🔊 AudioRenderer 音频渲染器"]
+    A1["从 SampleQueue 取样本"]
+    A2["按 DTS 顺序解码<br/>AAC → PCM"]
+    A3["按 PTS 输出到 AudioTrack"]
+  end
+
+  subgraph Clock["⏱️ 同步时钟"]
+    C1["音频时钟为主时钟<br/>AudioTrack 播放进度"]
+    C2["视频 PTS 对比音频时钟<br/>快了 → 等待<br/>慢了 → 丢帧/加速"]
+  end
+
+  PlayerControl -->|"发起播放请求"| Server
+  PlayerControl -->|"控制解析流程"| MediaParser
+  PlayerControl -->|"Seek 清空队列"| SampleQueue
+  PlayerControl -->|"暂停/恢复渲染"| VideoRenderer
+  PlayerControl -->|"暂停/恢复渲染"| AudioRenderer
+
+  Server --> MediaParser
+  P4 --> SampleQueue
+  SampleQueue --> V1
+  SampleQueue --> A1
+  A3 --> C1
+  C1 --> C2
+  C2 --> V4
+
+  style PlayerControl fill:#37474f,stroke:#263238,color:#fff
+  style CTRL fill:#455a64,stroke:#263238,color:#fff
+  style Server fill:#e8f5e9,stroke:#2e7d32
+  style MediaParser fill:#fff3e0,stroke:#ef6c00
+  style SampleQueue fill:#e3f2fd,stroke:#1565c0
+  style VideoRenderer fill:#fce4ec,stroke:#c62828
+  style AudioRenderer fill:#f3e5f5,stroke:#7b1fa2
+  style Clock fill:#fff9c4,stroke:#f9a825
+```
+
+
+**6)播放控制器（PlayerControl）**
+统一管理播放状态（播放/暂停/停止/seek）、缓冲控制、进度同步，是上层调用的核心入口。
+播放状态回调代码：
+```java
+private void initPlayer() {
+        player = new ExoPlayer.Builder(this).build();
+        playerView.setPlayer(player);
+        player.addListener(new Player.Listener() {
+            @Override
+            public void onPlaybackStateChanged(int playbackState) {
+                if (playbackState == Player.STATE_BUFFERING) {
+                    updateStatus("缓冲中...");
+                } else if (playbackState == Player.STATE_READY) {
+                    updateStatus("播放中");
+                } else if (playbackState == Player.STATE_ENDED) {
+                    updateStatus("播放结束");
+                }
+            }
+
+            @Override
+            public void onPlayerError(PlaybackException error) {
+                updateStatus("播放失败: " + error.getMessage());
+            }
+        });
+        // 播放hls
+        playUrl(hlsUrl);
+        // 当然也可以给playerView设置player
+        playerView.setPlayer(player);
+}
+```
 
 ### FFmpeg 在本项目中的集成
 
