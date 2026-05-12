@@ -1887,6 +1887,78 @@ rtmp {
 }
 ```
 
+**4)Nginx, FFmpeg, Docker的作用**
+
+```mermaid
+flowchart TD
+    subgraph Docker["🐳 Docker 容器环境"]
+        direction TB
+        Docker_Desc["<b>docker-compose.yml</b><br/>镜像: alfg/nginx-rtmp<br/>端口映射: 80/8080/1935<br/>文件挂载: 配置/页面/切片目录<br/>自动重启: unless-stopped"]
+    end
+
+    subgraph Nginx["🌐 Nginx 流媒体服务器"]
+        direction TB
+        
+        subgraph RTMP_Module["📡 RTMP 模块 (端口 1935)"]
+            RTMP_Accept["接收主播推流<br/>rtmp://xxx/stream/{name}"]
+            RTMP_Exec["exec ffmpeg<br/>调用 FFmpeg 转码"]
+            RTMP_Receive["接收 FFmpeg<br/>转码后的多路流"]
+        end
+
+        subgraph HLS_Module["📺 HLS 模块 (端口 8080)"]
+            HLS_Slice["切片: hls on<br/>hls_fragment=5s<br/>生成 .ts + .m3u8"]
+            HLS_Variant["多清晰度列表: hls_variant<br/>告诉播放器可选清晰度"]
+            HLS_Http["HTTP 提供切片访问<br/>http://xxx:8080/hls/..."]
+        end
+    end
+
+    subgraph FFmpeg["🎬 FFmpeg 转码引擎"]
+        direction TB
+        FF_Decode["解码原始 RTMP 流"]
+        FF_Encode["重新编码为 H.264 + AAC"]
+        FF_Resolutions["转出 5 档清晰度<br/>720P | 480P | 360P | 240P<br/>分辨率 -s / 码率 -b:v"]
+        FF_Output["输出到 Nginx HLS 模块<br/>rtmp://localhost:1935/hls/{name}"]
+    end
+
+    subgraph Client["👤 客户端"]
+        Publisher["主播推流<br/>OBS/APP"]
+        Player["观众播放<br/>HLS/DASH/RTMP"]
+    end
+
+    Publisher -->|"RTMP 推流"| RTMP_Accept
+    RTMP_Accept --> RTMP_Exec
+    RTMP_Exec -->|"exec ffmpeg 命令"| FFmpeg
+    FF_Decode --> FF_Encode --> FF_Resolutions --> FF_Output
+    FF_Output -->|"多路 RTMP 流"| RTMP_Receive
+    RTMP_Receive --> HLS_Slice
+    HLS_Slice --> HLS_Variant
+    HLS_Variant --> HLS_Http
+    HLS_Http -->|"HTTP 切片"| Player
+
+    Docker -.->|"启动并管理"| Nginx
+    Docker -.->|"内置 FFmpeg"| FFmpeg
+
+    %% 样式
+    style Docker fill:#e8eaf6,stroke:#3949ab,color:#000
+    style Docker_Desc fill:#c5cae9,stroke:#3949ab,color:#000
+    style Nginx fill:#e8f5e9,stroke:#2e7d32,color:#000
+    style RTMP_Module fill:#c8e6c9,stroke:#2e7d32,color:#000
+    style HLS_Module fill:#c8e6c9,stroke:#2e7d32,color:#000
+    style FFmpeg fill:#fff3e0,stroke:#ef6c00,color:#000
+    style Client fill:#e3f2fd,stroke:#1565c0,color:#000
+```
+
+| 组件   | 在 RTMP 中做什么           | 在 HLS 中做什么                   |
+|--------|-----------------------|------------------------------|
+| Nginx  | 接收推流、调度 FFmpeg、收转码流   | 切片(.ts/.m3u8)、多清晰度列表、HTTP 分发 |
+| FFmpeg | 解码原始流、改分辨率/码率、重新编码    | 输出多档清晰度给 Nginx               |
+| Docker | 拉取镜像、端口映射、文件挂载        | 容器守护、自动重启                    |
+
+关键结论：
+清晰度设置 → FFmpeg 的 -s、-b:v、-c:v 参数
+切片生成 → Nginx 的 hls on; hls_fragment 5;
+多清晰度列表 → Nginx 的 hls_variant
+RTSP 不在 Nginx → 本项目由 MediaMTX 容器承担
 
 #### MediaMTX（Docker 中的 RTSP）
 
