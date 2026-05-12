@@ -1711,54 +1711,182 @@ flowchart LR
 
 #### Nginx流媒体服务器
 
-仓库中存在 **两套 Nginx 配置路径**，勿混淆：
+**1)本项目的 Nginx 在 RTMP + HLS 在做什么**
 
-| 文件 | 作用 |
-|------|------|
-| `demo/springboot/docker/nginx/nginx.conf` | **仅 HTTP 反向代理**（Spring Boot、MinIO），**无 RTMP** |
-| `demo/springboot/nginx-docker/conf/nginx.conf` | **`nginx-rtmp-module`**：RTMP 接收、**exec ffmpeg** 转多码率、**HLS 切片与点播** |
+* Nginx做的事情：调度 / 设置 / 切片
+- 配置接收客户端推流url rtmp://xxx
+- 调用 FFmpeg（exec ffmpeg）
+- 接收 FFmpeg 转码后的多路流
+- 切成 HLS 切片（.ts + .m3u8）
+- 管理多清晰度播放列表
+- 提供 HTTP 访问切片
 
-**1) 本项目的 RTMP + HLS 在做什么（摘录逻辑）**
-
-```nginx
+参考代码：
+```yaml
 rtmp {
     server {
+        listen 1935;           # 接收推流
+        application stream { }  # 接收入口
+        application hls { }     # 播放出口
+        hls on;                 # 开启切片
+        hls_fragment 5;         # 切片 5 秒一片
+        hls_variant ...         # 告诉播放器有哪几种清晰度
+    }
+}
+```
+
+* FFmpeg 负责：
+- 解码原始推流
+- 压缩视频
+- 修改分辨率（720P/480P/360P/240P）
+- 改变码率
+- 编码成 h264 + aac
+- 输出5 种不同清晰度的流给 Nginx
+
+参考代码：
+```yaml
+#-c:a 音频编码
+#-b:a 音频码率
+#-c:v 视频编码
+#-b:v 视频码率
+#-s 分辨率
+#...输出到 Nginx 的 hls 应用
+
+exec ffmpeg -i rtmp://localhost:1935/stream/$name  # 输入流
+-c:a libfdk_aac -b:a 128k -c:v libx264 -b:v 2500k -s 1280x720 ...  # 720P
+-c:a libfdk_aac -b:a 128k -c:v libx264 -b:v 1000k -s 854x480 ...   # 480P
+... 输出 5 档清晰度到 Nginx HLS 模块
+```
+
+* Docker 负责：
+- 下载并运行带 RTMP + FFmpeg 的 Nginx 容器环境
+- 启动 Nginx 服务，让 Nginx 能够监听 1935（RTMP）、80、8080 端口
+- 端口映射：把宿主机的 80/8080/1935 端口转发到 Nginx 容器内部
+- 文件挂载：把本地的 nginx 配置、静态页面（Html）、HLS 切片目录（nginx-hls）映射进容器
+- 进程守护：保证 Nginx 异常退出时自动重启（restart: unless-stopped）
+
+参考代码：
+```yaml
+  nginx:
+    image: alfg/nginx-rtmp:latest       # 自带 RTMP 模块 + FFmpeg 的官方流媒体镜像
+    container_name: springboot-nginx    # 容器名称
+    restart: unless-stopped              # 异常自动重启
+    command: ["nginx", "-c", "/etc/nginx/nginx.conf"]  # 使用自定义配置启动
+    depends_on:
+      - springboot       # 依赖后端服务（WebSocket 代理需要）
+      - minio            # 依赖文件存储服务
+    ports:
+      - "80:80"          # HTTP 主端口：MinIO 代理 + WebSocket 代理
+      - "8080:8080"      # 直播专用端口：HLS 播放 + 监控页面
+      - "1935:1935"      # RTMP 推流端口（主播端推流地址）
+    volumes:
+      # 自定义 Nginx 主配置（RTMP + HLS + 代理）
+      - ../nginx-docker/conf/nginx.conf:/etc/nginx/nginx.conf
+      # MIME 类型配置
+      - ../nginx-docker/conf/mime.types:/etc/nginx/mime.types:ro
+      # 前端静态资源、stat 监控页面
+      - ../nginx-docker/html:/etc/nginx/html:ro
+      # HLS 切片文件持久化存储（.ts + .m3u8）
+      - nginx-hls:/tmp/hls
+```
+
+
+
+**2)核心问题**
+* 直播清晰度设置是谁做？
+- 分辨率、码率、编码 → FFmpeg 做
+```yaml
+-s 1280x720     分辨率
+-b:v 2500k      视频码率
+-c:v libx264    编码
+```
+- **`exec ffmpeg`**：可看作「服务端收到原始 RTMP 后的 **转码再分发**」，`-s`、`-b:v`、`-r` 等在 **ffmpeg 命令行**里指定 —— 这才是「分辨率/码率」的主要来源；**不是** `nginx.conf` 里单独一个叫「RTMP 分辨率」的魔法开关。
+
+
+* 在线视频切片是谁做？
+- HLS 切片（5 秒一片） → Nginx 做
+```yaml
+hls on;
+hls_fragment 5;
+```
+
+
+* 在线视频清晰度是谁做？
+- 多清晰度列表是谁做？ → Nginx 做
+```yaml
+hls_variant ...  告诉播放器有哪些清晰度
+```
+- **`hls_variant`**：生成 **多码率自适应 HLS**（不同子目录/`iframe`）。
+
+
+* nginx「能实现 rtsp://」吗？
+- **默认 nginx-rtmp 模块不做 RTSP 服务**。
+- 本项目 **RTSP** 由 **MediaMTX**（单独容器 `:8554`）承担；不要把 RTMP 配置误以为 RTSP。
+
+
+
+* nginx 与 RTMP「性能
+- **worker_connections**：限制并发连接。
+- **chunk_size**：RTMP 分块大小，影响小包聚合行为。
+- 十万并发播放通常需 **CDN + 边缘**，单机 nginx 瓶颈多在 **网卡带宽与 CPU 转发**。
+
+**3)核心nginx代码**
+```yaml
+# 关闭守护进程模式（Docker 中必须开启，让 Nginx 运行在前台）
+daemon off;
+
+events {
+  # 每个 worker 进程最大 1024 个连接
+  worker_connections 1024;
+}
+
+# RTMP 直播模块（推流 + 转码 + 分发）
+rtmp {
+    server {
+        # 监听 RTMP 默认端口 1935
         listen 1935;
+        chunk_size 4000;
+
+        # 推流应用：客户端往这里推流
         application stream {
-            live on;
-            # 收到一路直播后，fork ffmpeg 转五条不同分辨率码率的 RTMP 推回本地其他 application
-            exec ffmpeg -i rtmp://localhost:1935/stream/$name ...
+            live on; # 开启直播模式
+
+            # 收到流后，自动调用 ffmpeg 转码成 5 种清晰度
+            # 源：rtmp://localhost:1935/stream/流名
+            exec ffmpeg -i rtmp://localhost:1935/stream/$name
+              # 720P 高码率
+              -c:a libfdk_aac -b:a 128k -c:v libx264 -b:v 2500k -f flv -g 30 -r 30 -s 1280x720 -preset superfast -profile:v baseline rtmp://localhost:1935/hls/$name_720p2628kbs
+              # 480P
+              -c:a libfdk_aac -b:a 128k -c:v libx264 -b:v 1000k -f flv -g 30 -r 30 -s 854x480 -preset superfast -profile:v baseline rtmp://localhost:1935/hls/$name_480p1128kbs
+              # 360P
+              -c:a libfdk_aac -b:a 128k -c:v libx264 -b:v 750k -f flv -g 30 -r 30 -s 640x360 -preset superfast -profile:v baseline rtmp://localhost:1935/hls/$name_360p878kbs
+              # 240P 标准
+              -c:a libfdk_aac -b:a 400k -f flv -g 30 -r 30 -s 426x240 -preset superfast -profile:v baseline rtmp://localhost:1935/hls/$name_240p528kbs
+              # 240P 低码率（弱网）
+              -c:a libfdk_aac -b:a 64k -c:v libx264 -b:v 200k -f flv -g 15 -r 15 -s 426x240 -preset superfast -profile:v baseline rtmp://localhost:1935/hls/$name_240p264kbs;
         }
+
+        # HLS 播放应用：转码后的流输出成 m3u8 切片
         application hls {
             live on;
-            hls on;
-            hls_fragment 5;
-            hls_playlist_length 10;
-            hls_path /tmp/hls;
-            hls_nested on;
+            hls on; # 开启 HLS 切片
+            hls_fragment_naming system; # 切片命名方式
+            hls_fragment 5; # 每个切片 5 秒
+            hls_playlist_length 10; # 播放列表长度 10 秒
+            hls_path /tmp/hls; # 切片文件存放目录
+            hls_nested on; # 按流名创建子目录
+
+            # 5 种清晰度的自适应码率（HLS 多码率）
             hls_variant _720p2628kbs BANDWIDTH=2628000,RESOLUTION=1280x720;
-            # ... 多档 variant 对应 master m3u8
+            hls_variant _480p1128kbs BANDWIDTH=1128000,RESOLUTION=854x480;
+            hls_variant _360p878kbs BANDWIDTH=878000,RESOLUTION=640x360;
+            hls_variant _240p528kbs BANDWIDTH=528000,RESOLUTION=426x240;
+            hls_variant _240p264kbs BANDWIDTH=264000,RESOLUTION=426x240;
         }
     }
 }
 ```
 
-- **`exec ffmpeg`**：可看作「服务端收到原始 RTMP 后的 **转码再分发**」，`-s`、`-b:v`、`-r` 等在 **ffmpeg 命令行**里指定 —— 这才是「分辨率/码率」的主要来源；**不是** `nginx.conf` 里单独一个叫「RTMP 分辨率」的魔法开关。
-- **`hls_variant`**：生成 **多码率自适应 HLS**（不同子目录/`iframe`）。  
-- **HTTP `:8080`**：`location /hls { alias /tmp/hls/ }` 提供 **m3u8/ts** 静态下载。
-
-**2) nginx「能实现 rtsp://」吗？**
-
-- **默认 nginx-rtmp 模块不做 RTSP 服务**。  
-- 本项目 **RTSP** 由 **MediaMTX**（单独容器 `:8554`）承担；不要把 RTMP 配置误以为 RTSP。
-
-**3) nginx 与 RTMP「性能」**
-
-- **worker_connections**：限制并发连接。  
-- **chunk_size**：RTMP 分块大小，影响小包聚合行为。  
-- 十万并发播放通常需 **CDN + 边缘**，单机 nginx 瓶颈多在 **网卡带宽与 CPU 转发**。
-
----
 
 #### MediaMTX（Docker 中的 RTSP）
 
