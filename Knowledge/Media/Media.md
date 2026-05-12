@@ -1766,6 +1766,7 @@ exec ffmpeg -i rtmp://localhost:1935/stream/$name  # 输入流
 - 进程守护：保证 Nginx 异常退出时自动重启（restart: unless-stopped）
 
 参考代码：
+docker-compose.yml
 ```yaml
   nginx:
     image: alfg/nginx-rtmp:latest       # 自带 RTMP 模块 + FFmpeg 的官方流媒体镜像
@@ -1789,8 +1790,15 @@ exec ffmpeg -i rtmp://localhost:1935/stream/$name  # 输入流
       # HLS 切片文件持久化存储（.ts + .m3u8）
       - nginx-hls:/tmp/hls
 ```
-
-
+dockerFile
+下载FFmpeg
+```shell
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+```
+dockerfile用于运行前的容器构建，相当于`Maven`
+docker-compose.yml用于容器运行时的配置，当相遇`Nacos`或者`application.yml`
 
 **2)核心问题**
 * 直播清晰度设置是谁做？
@@ -1962,6 +1970,41 @@ RTSP 不在 Nginx → 本项目由 MediaMTX 容器承担
 
 #### MediaMTX（Docker 中的 RTSP）
 
+MediaMTX 天生就是干流媒体，完全没必要让流媒体走nginx。
+
+**为什么 RTMP 需要大量 Nginx 配置，而 RTSP 只需要 MediaMTX？**
+
+* Nginx 本身不支持 RTMP，需要：
+  - 安装 RTMP 模块
+  - 安装 FFmpeg 转码
+  - 编写 RTMP + HLS 配置
+  - 挂载配置、切片目录、端口映射
+    属于“改装后才能支持直播”。
+
+* MediaMTX 是原生全能流媒体服务器：
+  - 内置 RTSP、RTMP、WebRTC、HLS、SRT
+  - 内置转码、解封装、同步
+  - 无需配置文件
+  - 无需安装 FFmpeg
+  - 无需模块
+    启动即提供完整 RTSP 服务，支持推流、拉流、解码、播放。
+
+MediaMTX 所做的事情：
+- 启动 RTSP 服务器（端口 8554）
+- 接收/转发 RTSP 流
+- 解析 RTP 包、提取 H.264/AAC
+- 支持多客户端同时拉流
+- 支持中途入流、自动同步音视频
+
+**MediaMTX 能干掉 Nginx 哪些活？**
+MediaMTX 原生自带：
+✅ RTSP 推流 / 拉流
+✅ RTMP 推流 / 拉流（自带，不用 Nginx）
+✅ HLS 自动生成 m3u8/ts 切片
+✅ WebRTC 低延迟网页播放
+✅ 自带转码、多清晰度
+✅ 自带缓冲、音视频同步、SPS/PPS 补发
+
 `docker-compose.yml` 片段：
 
 ```yaml
@@ -1971,22 +2014,12 @@ mediamtx:
     - "8554:8554"
 ```
 
-**现状**：未挂载自定义 `mediamtx.yml`，即使用 **镜像默认配置**：在 **8554** 上提供 **RTSP 服务**（具体 path 以官方默认为准，常见为 `/path` 形式推/拉）。
-
-**RTSP 在协议栈中的角色（简述）**
-
-- **会话与控制**：`DESCRIBE` / `SETUP` / `PLAY` / `TEARDOWN`，协商传输通道。  
-- **媒体载荷**：常用 **RTP** 承载音视频；传输层可用 **UDP**（低延迟、易丢包）或 **TCP interleaved**（更稳、略增延迟）。  
-- **与 RTMP 对比**：RTMP 更偏「互联网直播一条龙」；RTSP 更偏 **监控、广播设备、局域网媒体**；本项目用 FFmpeg **推 RTSP** 时由 libavformat 完成封装。
-
 ```mermaid
 flowchart LR
     App[FFmpegPushBridge / ff_rtmp_pusher] --> MT[MediaMTX :8554]
     MT --> Viewer[RTP/RTSP 客户端]
     MT --> Rec[可选录像/转协议 依配置]
 ```
-
----
 
 ### RTSP文件推流
 
