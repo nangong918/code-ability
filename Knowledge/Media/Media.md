@@ -3155,20 +3155,34 @@ private void play(String url) {
 HLS 离线合并为 MP4（`convertHlsToMp4`）
 将本地缓存的 `index.m3u8` **无缝封装**为单个 MP4（不重编码，速度快）：
 
+
+服务器转化方案：
 ```java
-runCommand(List.of(
-        ffmpegBin,
-        "-y",
-        "-allowed_extensions", "ALL",
-        "-i",
-        localM3u8.toString(),
-        "-c",
-        "copy",
-        outputMp4.toString()
-), getFileWorkDir(fileId));
+public VideoHlsToMp4Response convertHlsToMp4(Long fileId, String baseUrl) {
+  // ===================== FFmpeg 执行 HLS → MP4 合并 =====================
+  runCommand(List.of(
+          ffmpegBin,              // FFmpeg 可执行程序
+          "-y",                   // 覆盖已存在的输出文件
+          "-allowed_extensions",   // 允许加载所有文件扩展名（解决m3u8读取限制）
+          "ALL",
+          "-i",                   // 输入文件：本地HLS索引
+          localM3u8.toString(),
+          "-c",                   // 音视频编码模式：copy（直接复制流，不重新编码）
+          "copy",
+          outputMp4.toString()    // 输出完整MP4文件
+  ), getFileWorkDir(fileId));
+
+  // 构建响应结果
+  VideoHlsToMp4Response response = new VideoHlsToMp4Response();
+  // 设置前端下载地址
+  response.setDownloadUrl(baseUrl + "/video/cloud/download/hls-mp4?fileId=" + fileId);
+  return response;
+}
 ```
 
 合并后的文件上传 MinIO，供 `/video/cloud/download/hls-mp4` 下载。
+
+Android离线转化方案： todo
 
 
 ### 播放原理（ExoPlayer 底层）
@@ -3546,8 +3560,30 @@ SpringBoot服务器在上传完成视频之后会对Mp4进行抽帧
     }
 ```
 
+**2) 数据解析**
 
-**2) 生成HLS**
+命令行
+```shell
+ffprobe -v error -show_entries format=duration,bit_rate -of default=noprint_wrappers=1:nokey=1 source.mp4
+```
+
+FFmpeg 解析媒体文件元数据
+```text
+ffprobe
+-v error                仅输出错误信息，屏蔽冗余日志
+-show_entries format=duration,bit_rate  提取视频时长、总码率
+-of default=noprint_wrappers=1:nokey=1  输出纯数值格式
+source.mp4              待解析的视频文件
+```
+
+FFprobe 核心库
+```text
+1. libavformat：解析视频封装格式，读取文件元信息
+2. libavutil：提供数值解析、字符串处理、时间管理工具
+```
+
+
+**3) 生成HLS**
 
 命令行：
 ```shell
@@ -3601,5 +3637,29 @@ FFmpeg 核心库（HLS 切片）:
 5. libavutil：时间戳、日志、内存管理等基础工具支持
 ```
 
+**4) HLS转为Mp4**
+
+
+命令行：
+```shell
+ffmpeg -y -allowed_extensions ALL -i index.m3u8 -c copy hls_merged.mp4
+```
+
+FFmpeg 命令行说明（HLS 转 Mp4）：
+```text
+ffmpeg
+-y                    覆盖已存在的输出文件
+-allowed_extensions ALL 允许加载所有文件类型（支持m3u8索引）
+-i index.m3u8          输入HLS索引文件
+-c copy                流复制模式，不重新编码，速度极快
+hls_merged.mp4         输出完整MP4文件
+```
+
+FFmpeg 核心库:
+```text
+1. libavformat：读取m3u8索引、合并TS切片、封装输出MP4文件
+2. libavcodec：音视频流解析与复制，无需编解码
+3. libavutil：时间戳、文件操作、内存管理等基础支持
+```
 
 
