@@ -3381,7 +3381,23 @@ RUN apt-get install -y --no-install-recommends ffmpeg
 
 ---
 
-### WebRTC 简介与对比
+### WebRTC
+
+
+#### WebRTC 简介
+
+**1) WebRTC是什么**
+WebRTC（Web Real-Time Communication，网页实时通信），是谷歌主导开源、W3C 标准的浏览器 / 终端原生实时音视频通信方案
+
+**2)为什么点对点直播用 WebRTC 不用 RTMP**
+
+RTMP 天生不适合点对点
+- RTMP 是中心化协议：必须依赖 RTMP 服务器 中转，无法终端直连；
+- 延迟偏高：RTMP 直播常规 3～5 秒，做不到连麦、实时互动；
+
+WebRTC 天生适配点对点
+- 支持 P2P 点对点直连，无需流媒体服务器中转；
+- 毫秒级低延迟（100～300ms），适合连麦、一对一直播、实时对讲；
 
 | 维度 | WebRTC | RTMP | RTSP | HLS |
 |------|--------|------|------|-----|
@@ -3389,19 +3405,76 @@ RUN apt-get install -y --no-install-recommends ffmpeg
 | 延迟 | **极低** | 中 | 中低 | 较高 |
 | 适用 | 连麦、会议 | 直播推流 | 监控/广播 | 点播/大规模分发 |
 
-**集成思路（概要）**
+**3)WebRTC 传输协议 & 数据格式**
+底层传输协议
+- 基础传输：UDP 为主（追求低延迟、弱网容忍）
+- 控制信令：可基于 HTTP/WebSocket/TCP
+- 媒体传输承载：RTP/RTCP（跑在 UDP 上）
+- 辅助穿透：
+  - STUN：获取公网地址，实现内网打洞 P2P
+  - TURN：打洞失败时，服务器中转兜底
 
-- **服务器**：Janus、mediasoup、Kurento、或云厂商 RTC；需 **TURN/STUN** 穿 NAT。  
-- **Android**：`org.webrtc`（Google 官方库），`PeerConnectionFactory` 创建 **PeerConnection**，`addTrack` 发送音视频。
+传输的数据格式
+- 编码格式
+  - 视频：VP8 / VP9 / H.264
+  - 音频：OPUS（默认标配，低延迟、弱网好、人声优化）
+- 封装传输格式
+  - 裸音视频帧 → 封装为 RTP 数据包 进行网络传输
+  - RTCP 配套做：带宽评估、拥塞控制、丢包反馈、同步时间戳
+  - 不使用 FLV/TS/MP4 这种大分片封装，是实时 RTP 小包流式传输
 
-```java
-// 示意：仅展示 API 形态，非本项目代码
-PeerConnectionFactory factory = PeerConnectionFactory.builder().createPeerConnectionFactory();
-MediaConstraints constraints = new MediaConstraints();
-PeerConnection pc = factory.createPeerConnection(rtcConfig, constraints, observer);
-```
+**4)WebRTC 大量用户拉流的劣势**
+P2P 无法承载高并发: 每一个观众都和主播建立一路 P2P 连接，主播上行带宽会被瞬间打满，几十人就撑不住
 
----
+
+**5) 协议选择**
+
+* P2P 一对一视频
+  - 选型: WebRTC
+  - 一对一纯实时互动，需要毫秒级低延迟；WebRTC 支持 NAT 穿透、终端直连无需服务器中转
+
+* 10 人小型会议
+  - 选型: WebRTC（MCU/SFU 架构）
+  - 人数少、要求实时互动、低延迟；用 WebRTC 搭配 SFU 中转即可，不用每个成员全互联，服务器只做媒体转发，带宽压力小、成本低
+
+* 100 人线上课堂
+  - 选型：主讲用 RTMP 推流 + 观众 HLS 拉流；互动小范围用 WebRTC
+  - 100 人已不适合全 WebRTC P2P，主播上行扛不住高并发；
+  - 采用主讲 RTMP 推流、HLS 分片分发，依托 CDN 稳定抗并发、弱网适配好、兼容所有终端；
+
+* 1000 人全校会议
+  - 选型：RTMP 推流 + HLS 主流播放（纯直播模式）
+  - 千人级高并发场景，核心诉求是稳定、高并发、CDN 全网分发、弱网流畅；
+
+
+**6)数据结构对比**
+
+| 对比维度 | RTP 帧 | RTMP Chunk 帧 |
+|---------|--------|---------------|
+| 整体结构 | 固定头 12B + 可选扩展头 + 媒体负载 | 基础头 + 消息头 + 可选扩展时间戳 + 负载 |
+| 头部特性 | 固定 12 字节，结构固定不可压缩 | 可变长 1~14 字节，支持头部压缩复用 |
+| 头部字段 | 版本、标记位、负载类型、序列号、时间戳、SSRC | Chunk 类型、流 ID、消息类型、消息长度、时间戳 |
+| 数据组成 | 直接承载 H.264 NAL/OPUS 裸编码帧 | 承载 RTMP 封装消息体，非纯裸 NAL |
+| 单帧长度 | 整体大包，受 MTU 限制，通常 1400B 左右 | 分片小包，默认负载 128B，大消息拆多块 |
+| 分片方式 | 超大 NAL 在 RTP 层 FU-A 分片 | 上层 Message 拆分为多个 Chunk 分片 |
+| 传输基础 | UDP，单包独立 | TCP，流式有序拼接重组 |
+
+#### WebRTC 集成
+
+
+服务器集成:
+
+
+
+Android集成:
+
+
+#### 代码实现
+
+**1)推流代码**
+
+**2)接收流+播放代码**
+
 
 ### 生产问题排查（花屏、卡顿、不同步、黑屏）
 
