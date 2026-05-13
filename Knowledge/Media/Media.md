@@ -2837,12 +2837,56 @@ HLS / DASH 本质就是「分片文件点播模式」，不用自己改 IBP、�
 
 #### HLS 组成结构
 
-* m3u8 索引文件
+* index.m3u8 索引文件
 文本格式，记录每个分片地址、时长、码率、序号，是播放器的 “播放清单”。
+```text
+index.m3u8          只有 200 字节，存的是播放列表
+seg_00001.ts        6 秒视频，约 3-8 MB 的 H.264+AAC 数据
+seg_00002.ts        6 秒视频，约 3-8 MB
+seg_00003.ts        6 秒视频，约 3-8 MB
+```
 
-* 媒体分片
+* 媒体分片.ts
   - 老式：MPEG-TS 分片（兼容性最强）
   - 新式：fMP4 分片（更省体积、适配自适应码率）
+
+index.m3u8 和 .ts 分别存储，m3u8会记录ts的索引路径。
+播放器会先从url获取m3u8，然后从url用m3u8索引逐个获得ts分片，播放。
+
+```mermaid
+sequenceDiagram
+    participant App as 你的 App 代码
+    participant Player as ExoPlayer
+    participant Nginx as Nginx 服务器
+    participant Local as 本地 hlsDir
+    participant OSS as MinIO OSS
+
+    App->>Player: player.setMediaItem(<br/>MediaItem.fromUri(<br/>"http://server/hls/video_123/index.m3u8"))
+
+    Player->>Nginx: GET /hls/video_123/index.m3u8
+    
+    Nginx->>Local: 本地有缓存?
+    
+    alt 本地有
+        Local-->>Nginx: 返回 index.m3u8
+    else 本地无
+        Nginx->>OSS: 下载 index.m3u8
+        OSS-->>Nginx: 返回文件
+        Nginx->>Local: 缓存到 hlsDir
+    end
+    
+    Nginx-->>Player: 返回 m3u8 内容
+    
+    Note over Player: 解析 m3u8，得到 ts 列表
+    Note over Player: seg_00001.ts, seg_00002.ts, ...
+
+    loop 逐个下载 ts 切片
+        Player->>Nginx: GET /hls/video_123/seg_00001.ts
+        Nginx-->>Player: 返回 ts 文件
+        Player->>Player: 解码播放
+    end
+```
+
 
 #### HLS 适合什么场景
 
@@ -2949,24 +2993,133 @@ public BaseResponse<VideoUploadCompleteResponse> completeUpload(
   return generateCover(localVideoPath, coverPath, fileWorkDir);
 }
 ```
+
 上传完成后若 MinIO 尚无 HLS，则本地调用 **ffmpeg** 生成切片并上传：
 
 ```java
-runCommand(List.of(
-        ffmpegBin, "-y", "-i", sourcePath.toString(),
-        "-c:v", "libx264", "-c:a", "aac",
-        "-hls_time", "6",
-        "-hls_list_size", "0",
-        "-hls_segment_filename", segmentPattern.toString(),
-        localHlsIndex.toString()
-), fileWorkDir);
+/**
+ * 确保视频所需的所有产物已生成（封面图 + HLS 切片）
+ * 逻辑：本地不存在则下载 → 封面不存在则生成并上传 → HLS 不存在则切片并上传
+ *
+ * @param source 视频源信息（OSS 中的文件信息）
+ */
+private void ensureVideoArtifacts(OssEntity source) {
+  // ======================== 生成并上传 HLS 切片（m3u8 + ts） ========================
+  // 构建 HLS 索引文件在 OSS 中的路径
+  String hlsIndexObject = buildHlsIndexObjectName(source.getObjectName());
+  // HLS 切片本地存储目录
+  Path hlsDir = getHlsDir(source.getId());
+  // 本地 HLS 索引文件路径
+  Path localHlsIndex = hlsDir.resolve("index.m3u8");
+
+  // 如果本地没有 HLS 索引文件，才需要处理
+  if (!Files.exists(localHlsIndex)) {
+    // 如果 OSS 中也没有 HLS 索引，则需要执行 FFmpeg 切片
+    if (!minioUtils.isObjectExist(source.getBucketName(), hlsIndexObject)) {
+      // 创建 HLS 切片目录
+      Files.createDirectories(hlsDir);
+      // 切片文件名格式：seg_00001.ts、seg_00002.ts ...
+      Path segmentPattern = hlsDir.resolve("seg_%05d.ts");
+
+      // ===================== FFmpeg 执行 HLS 切片 =====================
+      runCommand(List.of(
+              ffmpegBin,           // FFmpeg 执行程序
+              "-y",                // 覆盖输出文件
+              "-i",                // 输入文件
+              sourcePath.toString(),
+              "-c:v",              // 视频编码
+              "libx264",           // 使用 H.264 编码
+              "-c:a",              // 音频编码
+              "aac",               // 使用 AAC 编码
+              "-hls_time",         // 每个切片的时长
+              "6",                 // 6 秒一个切片
+              "-hls_list_size",    // m3u8 列表长度
+              "0",                 // 0 = 保留所有切片
+              "-hls_segment_filename", // 切片命名规则
+              segmentPattern.toString(),
+              localHlsIndex.toString() // 输出 m3u8 索引文件
+      ), fileWorkDir);
+
+      // 切片完成后，遍历所有切片文件（index.m3u8 + seg_xxx.ts）
+      try (Stream<Path> stream = Files.list(hlsDir)) {
+        for (Path path : stream.toList()) {
+          // 构建切片在 OSS 中的路径
+          String objectName = buildHlsSegmentObjectName(source.getObjectName(), path.getFileName().toString());
+          // 逐个上传切片到 MinIO
+          minioUtils.uploadLocalFile(source.getBucketName(), objectName, path.toString());
+        }
+      }
+    } else {
+      // OSS 已有 HLS 切片 → 直接从 MinIO 下载到本地缓存
+      downloadHlsCacheFromMinio(source, hlsDir, localHlsIndex);
+    }
+  }
+
+  // 所有视频产物处理完成 → 更新视频记录状态为 READY（就绪）
+  upsertVideoRecord(source, thumbnailObject, hlsIndexObject, null, null, STATUS_READY, null);
+}
 ```
 
-- **`hls_time 6`**：目标约 6 秒一片（实际按关键帧对齐）。
-- **`hls_list_size 0`**：m3u8 保留 **全部** 分片列表（适合点播完整列表；直播常用滑动窗口）。
+逻辑图
+```mermaid
+flowchart TD
+    Start(["<b>ensureVideoArtifacts 开始</b>"]) --> BuildPath["构建路径<br/>hlsIndexObject: OSS 中的 m3u8 路径<br/>hlsDir: 本地 HLS 切片目录<br/>localHlsIndex: 本地 index.m3u8 路径"]
 
-封面：`ffmpeg -ss 00:00:01 -i ... -frames:v 1 cover.jpg`。  
-元数据：`ffprobe` 取时长与码率。
+    BuildPath --> CheckLocal{"本地 index.m3u8<br/>是否存在?"}
+
+    CheckLocal -->|"存在"| Ready["跳过 HLS 处理<br/>本地已有切片缓存"]
+
+    CheckLocal -->|"不存在"| CheckOSS{"OSS 中 m3u8<br/>是否存在?"}
+
+    CheckOSS -->|"存在"| Download["从 MinIO 下载<br/>下载 HLS 缓存到本地<br/>downloadHlsCacheFromMinio()"]
+
+    CheckOSS -->|"不存在"| CreateDir["创建本地 HLS 目录<br/>Files.createDirectories(hlsDir)"]
+
+    CreateDir --> FFmpeg["<b>执行 FFmpeg 切片</b><br/>runCommand()"]
+
+    subgraph FFmpegCmd["FFmpeg 命令参数"]
+        direction TB
+        F1["ffmpeg -y<br/>覆盖已有输出"]
+        F2["-i {sourcePath}<br/>输入源视频文件"]
+        F3["-c:v libx264<br/>视频编码 H.264"]
+        F4["-c:a aac<br/>音频编码 AAC"]
+        F5["-hls_time 6<br/>每切片 6 秒"]
+        F6["-hls_list_size 0<br/>保留全部切片"]
+        F7["-hls_segment_filename<br/>seg_%05d.ts"]
+        F8["输出: index.m3u8"]
+    end
+
+    FFmpeg --> FFmpegCmd
+
+    FFmpegCmd --> IterateFiles["遍历 hlsDir 目录<br/>所有切片文件<br/>index.m3u8 + seg_xxx.ts"]
+
+    IterateFiles --> LoopStart{"还有未上传<br/>的切片文件?"}
+
+    LoopStart -->|"是"| BuildObjName["构建 OSS 对象名<br/>buildHlsSegmentObjectName()"]
+    BuildObjName --> Upload["上传到 MinIO<br/>minioUtils.uploadLocalFile()"]
+    Upload --> LoopStart
+
+    LoopStart -->|"否"| Ready
+
+    Download --> Ready
+
+    Ready --> Upsert["更新视频记录<br/>upsertVideoRecord()<br/>status = STATUS_READY"]
+
+    Upsert --> End(["<b>结束</b>"])
+
+    %% 样式
+    style Start fill:#37474f,stroke:#263238,color:#fff
+    style End fill:#37474f,stroke:#263238,color:#fff
+    style FFmpeg fill:#fff3e0,stroke:#ef6c00,color:#000
+    style FFmpegCmd fill:#fff8e1,stroke:#f9a825,color:#000
+    style Upload fill:#e8f5e9,stroke:#2e7d32,color:#000
+    style Download fill:#e3f2fd,stroke:#1565c0,color:#000
+    style Upsert fill:#f3e5f5,stroke:#7b1fa2,color:#000
+    style CheckLocal fill:#fff,stroke:#37474f,color:#000
+    style CheckOSS fill:#fff,stroke:#37474f,color:#000
+    style LoopStart fill:#fff,stroke:#37474f,color:#000
+```
+
 
 **2) HLS传输与播放**
 
@@ -2976,12 +3129,22 @@ Docker 内 Nginx管理清晰度列表
 
 Android 本地播放 `LocalHlsPlayerActivity`
 
+播放本地缓存
 ```java
-player = new ExoPlayer.Builder(this).build();
-playerView.setPlayer(player);
-player.setMediaItem(MediaItem.fromUri(Uri.fromFile(playlistFile)));
-player.prepare();
-player.play();
+private init() {
+  player = new ExoPlayer.Builder(this).build();
+  playerView.setPlayer(player);
+  player.setMediaItem(MediaItem.fromUri(Uri.fromFile(playlistFile)));
+  player.prepare();
+  player.play();
+}
+```
+
+播放云上
+```java
+private void play(String url) {
+  playUrl(hlsUrl);
+}
 ```
 
 即用 **file://** 指向缓存目录下的 **index.m3u8**。
@@ -3382,5 +3545,61 @@ SpringBoot服务器在上传完成视频之后会对Mp4进行抽帧
         }
     }
 ```
+
+
+**2) 生成HLS**
+
+命令行：
+```shell
+#!/bin/bash
+
+# ===================== 【配置项】请根据实际情况修改 =====================
+FFMPEG_BIN="ffmpeg"                  # ffmpeg 路径
+SOURCE_FILE="input.mp4"              # 输入视频文件
+OUTPUT_HLS_DIR="./hls"                # 切片输出目录
+SEGMENT_PATTERN="$OUTPUT_HLS_DIR/seg_%05d.ts"  # 切片命名规则
+HLS_INDEX="$OUTPUT_HLS_DIR/index.m3u8"          # m3u8 索引文件
+HLS_TIME=6                           # 每个切片 6 秒
+WORK_DIR="./"                        # 工作目录
+
+# 创建输出目录
+mkdir -p "$OUTPUT_HLS_DIR"
+
+# ===================== FFmpeg 切片命令 =====================
+$FFMPEG_BIN \
+  -y \
+  -i "$SOURCE_FILE" \
+  -c:v libx264 \
+  -c:a aac \
+  -hls_time $HLS_TIME \
+  -hls_list_size 0 \
+  -hls_segment_filename "$SEGMENT_PATTERN" \
+  "$HLS_INDEX"
+
+echo "HLS 切片完成！生成文件：$HLS_INDEX"
+```
+
+FFmpeg 命令行说明（HLS 切片）:
+```text
+ffmpeg
+-y                    覆盖已存在的输出文件
+-i source.mp4         输入视频文件
+-c:v libx264          视频编码器使用 H.264
+-c:a aac              音频编码器使用 AAC
+-hls_time 6           设置每个切片时长为 6 秒
+-hls_list_size 0      保留所有切片，不删除旧切片
+-hls_segment_filename seg_%05d.ts  切片文件命名规则
+index.m3u8            输出 HLS 索引文件
+```
+
+FFmpeg 核心库（HLS 切片）:
+```text
+1. libavformat：解封装 MP4 视频流，封装输出 MPEG-TS 切片与 m3u8 索引
+2. libavcodec：视频编码（libx264）、音频编码（AAC）
+3. libswresample：音频重采样、格式适配
+4. libswscale：视频图像格式转换、色彩空间处理
+5. libavutil：时间戳、日志、内存管理等基础工具支持
+```
+
 
 
