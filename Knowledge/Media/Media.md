@@ -3464,16 +3464,410 @@ P2P 无法承载高并发: 每一个观众都和主播建立一路 P2P 连接，
 
 服务器集成:
 
+**1)Docker中的 coturn（TURN）**
+
+`demo/springboot/docker/docker-compose.yml` 中的 **coturn** 服务要点：
+
+| 参数 | 作用 |
+|------|------|
+| `--lt-cred-mech` | 启用 **长期凭证** 认证（用户名+密码），与客户端 `IceServer.setUsername/setPassword` 对应。 |
+| `--user=${TURN_USER:-webrtc}:${TURN_PASSWORD:-webrtc123}` | Compose 在 **启动容器前** 展开环境变量：`TURN_USER` 未设则用 `webrtc`，密码未设则用 `webrtc123`。这样 **开发环境零配置可跑**；生产应通过 `.env` 或编排密钥注入覆盖默认值。 |
+| `--fingerprint` | SDP 中使用 **DTLS fingerprint** 语义，与 WebRTC 栈常见配置一致，减少与部分客户端的兼容问题。 |
+| `--listening-port=3478` | 标准 STUN/TURN 端口；TCP/UDP 均映射，便于 **UDP 被禁** 时走 TCP TURN。 |
+| `--min-port` ~ `--max-port` | **中继端口范围**：媒体走 TURN 时，服务端在此区间分配 **UDP 中继**；必须映射到宿主机，否则对端收不到中继流量。 |
+
+**2)Nginx 与信令 WebSocket**
 
 
-Android集成:
+```yml
+  # ----------------------
+  # WebSocket 代理（你之前的 webrtc 信令）
+  # 把 ws://ip/ws/ 转发到 springboot:48888/ws/
+  # ----------------------
+  location /ws/ {
+      proxy_pass http://springboot:48888/ws/;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+  }
+```
+
+**3) Android（flutteraar）：Gradle 与库选型**
+
+- **版本目录** `demo/flutter/flutteraar/gradle/libs.versions.toml`：`io.github.webrtc-sdk:android:125.6422.07`（`org.webrtc.*` API 与 Google 官方栈一致，社区维护的 Maven 分发）。
+- **app/build.gradle**：`implementation libs.webrtc.android` 引入通话所需 native；`implementation libs.okhttp` 用于 **WebSocket 信令**。
 
 
-#### 代码实现
+**4)Android：采集 → 编码 →「推流」→「拉流」→ 播放**
 
-**1)推流代码**
+逻辑活动图（采集 → 推流 → 拉流 → 播放）
+```mermaid
+flowchart TD
+    Start(["<b>开始：WebRTC 通话</b>"]) --> Init["<b>初始化</b><br/>initPeerConnectionFactory()<br/>initRenderers()<br/>initLocalTracks()"]
 
-**2)接收流+播放代码**
+    Init --> CreateVideo["<b>创建视频采集器</b><br/>createVideoCapturer()<br/>Camera2Enumerator 枚举摄像头<br/>优先前置 → 兜底后置"]
+
+    CreateVideo --> StartCapture["<b>启动采集</b><br/>videoCapturer.startCapture(640x480, 30fps)<br/>绑定 SurfaceTextureHelper"]
+
+    StartCapture --> CreateTracks["<b>创建本地轨道</b><br/>VideoTrack + AudioTrack<br/>添加到 PeerConnection"]
+
+    CreateTracks --> CallerCheck{"呼叫方<br/>(Caller)?"}
+
+    CallerCheck -->|"是"| CreateOffer["<b>创建 Offer</b><br/>peerConnection.createOffer()<br/>设置 localDescription<br/>发送 OFFER 信令"]
+    CallerCheck -->|"否"| WaitOffer["等待 OFFER 信令"]
+
+    CreateOffer --> Signaling["<b>信令服务器中转</b><br/>OFFER → ANSWER<br/>ICE_CANDIDATE 交换"]
+
+    WaitOffer --> ReceiveOffer["收到 OFFER"] --> CreateAnswer["<b>创建 Answer</b><br/>peerConnection.createAnswer()<br/>设置 localDescription<br/>发送 ANSWER 信令"] --> Signaling
+
+    Signaling --> IceGather["<b>ICE 候选者收集</b><br/>onIceCandidate()<br/>sendIceCandidate()"]
+
+    IceGather --> IceConnect{"ICE 穿透成功?"}
+    IceConnect -->|"否"| IceFail["连接失败"]
+    IceConnect -->|"是"| P2P["<b>P2P 连接建立</b><br/>RTP 传输通道就绪"]
+
+    P2P --> PushStream["<b>推流（自动）</b><br/>编码后 YUV/PCM → RTP 包<br/>通过 ICE 通道发送到对端"]
+
+    PushStream --> ReceiveTrack["<b>拉流（自动）</b><br/>接收 RTP 包<br/>DefaultVideoDecoderFactory 解码"]
+
+    ReceiveTrack --> OnTrack["<b>onTrack 回调</b><br/>获取远端 VideoTrack<br/>绑定到 remoteRenderer"]
+
+    OnTrack --> Render["<b>播放渲染</b><br/>remoteTrack.addSink(remoteRenderer)<br/>SurfaceViewRenderer + EGL/OpenGL<br/>音频自动输出 AudioTrack"]
+
+    Render --> CallEnd{"通话结束?"}
+    CallEnd -->|"否"| PushStream
+    CallEnd -->|"是"| Close["<b>释放资源</b><br/>peerConnection.close()<br/>videoCapturer.stopCapture()"]
+
+    Close --> End(["<b>结束</b>"])
+
+    style Start fill:#37474f,stroke:#263238,color:#fff
+    style End fill:#37474f,stroke:#263238,color:#fff
+    style Init fill:#e3f2fd,stroke:#1565c0
+    style CreateVideo fill:#e3f2fd,stroke:#1565c0
+    style StartCapture fill:#e3f2fd,stroke:#1565c0
+    style CreateTracks fill:#e3f2fd,stroke:#1565c0
+    style CreateOffer fill:#fff3e0,stroke:#ef6c00
+    style CreateAnswer fill:#fff3e0,stroke:#ef6c00
+    style Signaling fill:#f3e5f5,stroke:#7b1fa2
+    style IceGather fill:#e8f5e9,stroke:#2e7d32
+    style P2P fill:#e8f5e9,stroke:#2e7d32
+    style PushStream fill:#ffcdd2,stroke:#c62828
+    style ReceiveTrack fill:#ffcdd2,stroke:#c62828
+    style Render fill:#fff9c4,stroke:#f9a825
+```
+
+
+数据通信图:
+```mermaid
+flowchart TD
+    subgraph VideoCapture["📷 视频采集（Camera2）"]
+        Cam["Camera2 API<br/>采集 YUV420 帧<br/>640x480 @ 30fps"]
+        Surface["SurfaceTextureHelper<br/>纹理帧 → I420 格式"]
+        Cam -->|"YUV420 帧"| Surface
+    end
+
+    subgraph AudioCapture["🎙️ 音频采集（AudioRecord）"]
+        Mic["麦克风<br/>采集 PCM 原始音频<br/>16-bit, 16kHz/48kHz, 单声道"]
+        AudioFrame["AudioFrame<br/>PCM 采样数据"]
+        Mic -->|"PCM 数据流"| AudioFrame
+    end
+
+    subgraph VideoEncode["🎬 视频编码器（DefaultVideoEncoderFactory）"]
+        VCodecCheck{"硬件编码<br/>能力?"}
+        H264["H.264 硬编码<br/>（优先）"]
+        VP8["VP8 软编码<br/>（兜底）"]
+        Surface --> VCodecCheck
+        VCodecCheck -->|"支持"| H264
+        VCodecCheck -->|"降级"| VP8
+    end
+
+    subgraph AudioEncode["🔊 音频编码器（内置 Opus/iSAC）"]
+        ACodecCheck{"音频编码<br/>格式?"}
+        Opus["Opus 编码<br/>（WebRTC 默认）"]
+        iSAC["iSAC 编码<br/>（窄带/宽带）"]
+        AudioFrame --> ACodecCheck
+        ACodecCheck -->|"默认"| Opus
+        ACodecCheck -->|"低码率"| iSAC
+    end
+
+    subgraph RTPVideo["📦 视频 RTP 打包"]
+        V_RTP["视频 RTP 包<br/>H.264/VP8 Payload<br/>带 PTS 时间戳<br/>SSRC=视频流"]
+    end
+
+    subgraph RTPAudio["📦 音频 RTP 打包"]
+        A_RTP["音频 RTP 包<br/>Opus/iSAC Payload<br/>带 PTS 时间戳<br/>SSRC=音频流"]
+    end
+
+    H264 --> V_RTP
+    VP8 --> V_RTP
+    Opus --> A_RTP
+    iSAC --> A_RTP
+
+    subgraph Transport["🚀 传输层（ICE 通道）"]
+        UDP_V["视频 UDP"]
+        UDP_A["音频 UDP"]
+        RTCP["RTCP 控制包<br/>（SR/RR 质量报告）"]
+        V_RTP --> UDP_V
+        A_RTP --> UDP_A
+        V_RTP -.-> RTCP
+        A_RTP -.-> RTCP
+    end
+
+    subgraph Network["🌐 网络"]
+        Net["P2P 直连 / TURN 中继<br/>音视频 RTP 独立通道"]
+        UDP_V --> Net
+        UDP_A --> Net
+    end
+
+    subgraph VideoReceive["📥 视频接收"]
+        V_Recv["接收视频 RTP 包<br/>排序/去重/丢包"]
+        V_Dec["视频解码<br/>H.264/VP8 → YUV420"]
+        Net --> V_Recv --> V_Dec
+    end
+
+    subgraph AudioReceive["📥 音频接收"]
+        A_Recv["接收音频 RTP 包<br/>排序/去重/丢包<br/>NetEQ 抖动缓冲"]
+        A_Dec["音频解码<br/>Opus/iSAC → PCM"]
+        Net --> A_Recv --> A_Dec
+    end
+
+    subgraph VideoRender["🖥️ 视频渲染"]
+        SurfaceRender["SurfaceViewRenderer<br/>EGL/OpenGL 硬件渲染"]
+        Screen["屏幕显示"]
+        V_Dec -->|"YUV420"| SurfaceRender --> Screen
+    end
+
+    subgraph AudioRender["🔈 音频播放"]
+        AudioTrack["AudioTrack<br/>系统音频输出"]
+        Speaker["扬声器"]
+        A_Dec -->|"PCM 16-bit"| AudioTrack --> Speaker
+    end
+
+    subgraph Sync["⏱️ 音视频同步"]
+        SyncClock["SRTP 时间戳对齐<br/>视频 PTS ↔ 音频 PTS<br/>以音频时钟为主"]
+        V_Dec -.-> SyncClock
+        A_Dec -.-> SyncClock
+        SyncClock -.->|"同步信号"| SurfaceRender
+    end
+
+    style VideoCapture fill:#e3f2fd,stroke:#1565c0
+    style AudioCapture fill:#e8eaf6,stroke:#3949ab
+    style VideoEncode fill:#fff3e0,stroke:#ef6c00
+    style AudioEncode fill:#fff8e1,stroke:#f9a825
+    style RTPVideo fill:#f3e5f5,stroke:#7b1fa2
+    style RTPAudio fill:#ede7f6,stroke:#6a1b9a
+    style Transport fill:#e8f5e9,stroke:#2e7d32
+    style Network fill:#ffcdd2,stroke:#c62828
+    style VideoReceive fill:#e8f5e9,stroke:#2e7d32
+    style AudioReceive fill:#c8e6c9,stroke:#388e3c
+    style VideoRender fill:#fff9c4,stroke:#f9a825
+    style AudioRender fill:#fff9c4,stroke:#f9a825
+    style Sync fill:#ffccbc,stroke:#d84315
+```
+
+
+
+##### 视频采集
+- 核心类：VideoCapturer（WebRTC 抽象采集器）、Camera2Enumerator（Android 相机枚举器）
+```java
+// 创建视频采集器（优先前置摄像头，兜底后置）
+private VideoCapturer createVideoCapturer() {
+  Camera2Enumerator enumerator = new Camera2Enumerator(this);
+  String[] deviceNames = enumerator.getDeviceNames();
+  // 优先前置摄像头
+  for (String deviceName : deviceNames) {
+    if (enumerator.isFrontFacing(deviceName)) {
+      CameraVideoCapturer capturer = enumerator.createCapturer(deviceName, null);
+      if (capturer != null) return capturer;
+    }
+  }
+  // 兜底后置摄像头
+  for (String deviceName : deviceNames) {
+    if (!enumerator.isFrontFacing(deviceName)) {
+      CameraVideoCapturer capturer = enumerator.createCapturer(deviceName, null);
+      if (capturer != null) return capturer;
+    }
+  }
+  return null;
+}
+
+// 初始化采集器并启动采集
+private void initLocalTracks() {
+  videoCapturer = createVideoCapturer();
+  surfaceTextureHelper = SurfaceTextureHelper.create("WebRtcCaptureThread", eglBase.getEglBaseContext());
+  videoSource = peerConnectionFactory.createVideoSource(videoCapturer.isScreencast());
+  // 绑定采集器与视频源
+  videoCapturer.initialize(surfaceTextureHelper, getApplicationContext(), videoSource.getCapturerObserver());
+  // 启动采集（分辨率640x480，帧率30）
+  videoCapturer.startCapture(VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS);
+}
+```
+
+##### 编码（音视频数据编码）
+编码器工厂初始化
+```java
+private void initPeerConnectionFactory() {
+  // 初始化 WebRTC 工厂
+  PeerConnectionFactory.initialize(
+          PeerConnectionFactory.InitializationOptions.builder(this)
+                  .setEnableInternalTracer(false)
+                  .createInitializationOptions()
+  );
+  // 视频编码器/解码器工厂（基于 EGL 上下文）
+  DefaultVideoEncoderFactory encoderFactory =
+          new DefaultVideoEncoderFactory(eglBase.getEglBaseContext(), true, true);
+  DefaultVideoDecoderFactory decoderFactory =
+          new DefaultVideoDecoderFactory(eglBase.getEglBaseContext());
+  // 构建 PeerConnectionFactory，绑定编解码器
+  peerConnectionFactory = PeerConnectionFactory.builder()
+          .setVideoEncoderFactory(encoderFactory)
+          .setVideoDecoderFactory(decoderFactory)
+          .createPeerConnectionFactory();
+} 
+```
+DefaultVideoEncoderFactory：默认支持 H.264/VP8/VP9 等编码格式，自动适配设备硬件编码能力；
+
+
+##### 推流（本地数据传输到对端）
+WebRTC 无 “传统推流”（如 RTMP）概念，而是通过 P2P 协商 + ICE 穿透 + RTP 传输 实现数据推送，核心流程：
+
+###### 信令协商（Offer/Answer 交换）
+呼叫方（Caller）创建 Offer：
+```java
+private void maybeCreateOffer() {
+    if (!caller || offerSent || !peerJoined || peerConnection == null || callEnded) return;
+    offerSent = true;
+    MediaConstraints constraints = new MediaConstraints();
+    constraints.mandatory.add(new MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"));
+    constraints.mandatory.add(new MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"));
+    // 创建 SDP Offer（包含编码能力、媒体信息）
+    peerConnection.createOffer(new SimpleSdpObserver() {
+        @Override
+        public void onCreateSuccess(SessionDescription sessionDescription) {
+            // 设置本地 SDP
+            peerConnection.setLocalDescription(new SimpleSdpObserver() {
+                @Override
+                public void onSetSuccess() {
+                    // 通过信令服务发送 Offer 给对端
+                    sendSimpleSignal(WebRtcSignalTypes.OFFER, payload);
+                }
+            }, sessionDescription);
+        }
+    }, constraints);
+}
+```
+被叫方（Callee）回复 Answer：
+```java
+private void createAndSendAnswer() {
+    // 创建 SDP Answer 并通过信令发送
+    peerConnection.createAnswer(new SimpleSdpObserver() {
+        @Override
+        public void onCreateSuccess(SessionDescription sessionDescription) {
+            peerConnection.setLocalDescription(new SimpleSdpObserver() {
+                @Override
+                public void onSetSuccess() {
+                    sendSimpleSignal(WebRtcSignalTypes.ANSWER, payload);
+                }
+            }, sessionDescription);
+        }
+    }, constraints);
+}
+```
+
+
+###### ICE 穿透（网络地址协商）
+本地 ICE 候选者收集：
+```java
+// PeerConnection 观察者监听 ICE 候选者生成
+@Override
+public void onIceCandidate(IceCandidate iceCandidate) {
+    // 发送 ICE 候选者给对端
+    sendIceCandidate(iceCandidate);
+}
+```
+ICE 候选者发送：
+```java
+private void sendIceCandidate(IceCandidate iceCandidate) {
+    JSONObject payload = new JSONObject();
+    payload.put("candidate", iceCandidate.sdp);
+    payload.put("sdpMid", iceCandidate.sdpMid);
+    payload.put("sdpMLineIndex", iceCandidate.sdpMLineIndex);
+    // 通过信令服务发送 ICE 候选者
+    sendSimpleSignal(WebRtcSignalTypes.ICE_CANDIDATE, payload);
+}
+```
+
+###### 数据推流（RTP 传输）
+- 当 SDP 协商完成 + ICE 穿透成功后，PeerConnection 建立 P2P 连接；
+- 本地编码后的音视频 RTP 包通过 ICE 协商的网络通道（UDP/TCP）自动推送到对端；
+- 代码中无需手动处理 RTP 发送，WebRTC 底层自动完成。
+
+
+##### 拉流（接收对端音视频数据）
+WebRTC 自动接收对端 RTP 包，完成解码后通过轨道（Track）暴露给应用层
+
+###### 接收远端媒体轨道
+```java
+// PeerConnection 观察者监听远端轨道添加
+@Override
+public void onTrack(RtpTransceiver transceiver) {
+    MediaStreamTrack track = transceiver.getReceiver().track();
+    if (!(track instanceof VideoTrack)) return;
+    VideoTrack remoteTrack = (VideoTrack) track;
+    // 将远端视频轨道绑定到渲染视图
+    runOnUiThread(() -> remoteTrack.addSink(remoteRenderer));
+}
+
+// 兼容旧版 onAddStream 回调
+@Override
+public void onAddStream(MediaStream mediaStream) {
+    if (mediaStream == null || mediaStream.videoTracks.isEmpty()) return;
+    VideoTrack videoTrack = mediaStream.videoTracks.get(0);
+    runOnUiThread(() -> videoTrack.addSink(remoteRenderer));
+}
+```
+
+###### 拉流关键逻辑
+PeerConnection 底层自动接收对端 RTP 包，通过解码器工厂（DefaultVideoDecoderFactory）解码；
+解码后的原始音视频数据通过 VideoTrack/AudioTrack 暴露，应用层只需将轨道绑定到渲染视图即可；
+音频无需手动处理，WebRTC 自动将解码后的音频数据送入扬声器播放。
+
+##### 播放（音视频渲染）
+
+通过 WebRTC 提供的 SurfaceViewRenderer 实现视频渲染，音频自动播放
+```java
+private void initRenderers() {
+    eglBase = EglBase.create();
+    // 本地渲染视图初始化
+    localRenderer.init(eglBase.getEglBaseContext(), null);
+    localRenderer.setMirror(true); // 前置摄像头镜像
+    localRenderer.setEnableHardwareScaler(true);
+    // 远端渲染视图初始化
+    remoteRenderer.init(eglBase.getEglBaseContext(), null);
+    remoteRenderer.setMirror(false);
+    remoteRenderer.setEnableHardwareScaler(true);
+}
+```
+
+绑定轨道到渲染视图
+```java
+private void bindTrackToRenderer() {
+  // 本地视频播放：绑定本地轨道到本地渲染视图
+  localVideoTrack.addSink(localRenderer);
+
+  // 远端视频播放：绑定远端轨道到远端渲染视图
+  remoteTrack.addSink(remoteRenderer);
+}
+```
+
+播放关键逻辑
+- SurfaceViewRenderer 是 WebRTC 封装的高性能渲染控件，基于 EGL/OpenGL 实现硬件加速；
+- setMirror(true) 适配前置摄像头的镜像显示；
+- 音频播放：WebRTC 解码后的音频数据自动接入 Android 音频系统，无需绑定视图，只需保证 localAudioTrack/ 远端音频轨道启用即可。
 
 
 ### 生产问题排查（花屏、卡顿、不同步、黑屏）
