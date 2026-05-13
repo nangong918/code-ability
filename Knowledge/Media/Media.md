@@ -2823,6 +2823,11 @@ graph TB
 
 ### HLS 与 DASH
 
+#### HLS 本质
+
+HLS（HTTP Live Streaming）苹果推出的基于 HTTP 的流媒体分片协议
+把完整长视频 / 直播流，按固定时长切成小分片（TS/fMP4），再生成一份 m3u8 索引文件。
+播放器只下载索引 → 按需逐个下载分片，不用一次性加载完整视频文件。
 HLS / DASH 本质就是「分片文件点播模式」，不用自己改 IBP、不用强行改 GOP，直接沿用转码源的 IBP 结构就行。
 
 | 协议 | 容器/索引 | 典型场景 |
@@ -2830,16 +2835,120 @@ HLS / DASH 本质就是「分片文件点播模式」，不用自己改 IBP、�
 | **HLS** | m3u8 + MPEG-TS 或 fMP4 | Apple 生态友好、CDN 成熟、点播直播皆宜 |
 | **DASH** | MPD + fMP4 | Android/Web 标准化好，自适应普遍 |
 
-**为何业界常见 HLS 多于 DASH（主观归纳）**：历史兼容、Safari、运维工具链；新项目亦可 **双模板**。
+#### HLS 组成结构
 
-**切片是否等于「不必一次加载全文件」**：是。播放器只请求 **当前片段与索引**，适合长视频与自适应码率。
+* m3u8 索引文件
+文本格式，记录每个分片地址、时长、码率、序号，是播放器的 “播放清单”。
 
----
+* 媒体分片
+  - 老式：MPEG-TS 分片（兼容性最强）
+  - 新式：fMP4 分片（更省体积、适配自适应码率）
 
-### 本项目 HLS 生成逻辑（Spring Boot + MinIO + 可选 Docker FFmpeg）
+#### HLS 适合什么场景
 
-**1) 后端 `VideoMediaServiceImpl.ensureVideoArtifacts`**
+1. 点播场景
+   - 长视频点播：电影、剧集、课程视频
+   - 大文件分发：不用全量下载，边下边播、支持随意拖拽进度
+   - 手机 / 网页端长视频播放，防 OOM、减少初始加载时延
+2. 直播场景
+   - 安防监控网页 / 手机实时预览
+   - 赛事直播、网课直播、直播间流媒体
+   - 弱网、跨运营商、复杂网络环境下直播
+3. 终端适配场景
+   - 苹果全生态原生支持：iPhone、iPad、Mac、Safari 浏览器无需额外解码器
+   - 安卓、小程序、H5 网页全平台兼容
+   - 智能电视、机顶盒、播放器普遍内置 HLS 解析
+4. CDN 分发首选场景
+   - HLS 分片是准静态文件，天然适合 CDN 边缘缓存
+   - 全国节点就近分发，抗高并发、省源站带宽、降低卡顿
+   - 运维成熟、各大云 CDN 对 HLS 优化最完善
 
+#### HLS 核心作用
+
+1. 大视频分片化
+   - 把几 GB 4K 大视频切成几秒小分片，播放器只加载当前需要的片段，杜绝一次性加载整文件导致 OOM、卡顿。
+2. 适配任意网络
+   - 基于 HTTP，穿透性极强，局域网、4G/5G、公司内网都能正常播放。
+3. 支持自适应码率（多码率 HLS）
+   - 同一份视频提供 1080P/720P/480P 多档分片，网络差自动切低清，网络好自动切高清。
+4. 不用干预编码结构
+   - 切片只做物理分割，不重新编码、不修改原流 I/P/B 帧、不强行改 GOP，转码源是什么结构，HLS 就沿用什么结构，开发成本极低。
+5. 兼容全终端、免插件
+   - H5 网页原生播放，无需安装播放器插件，小程序、移动端、PC 浏览器全适配。
+6. 适配 CDN
+   - 分片 + 索引都是静态资源，可全量缓存到 CDN 边缘节点，海量用户不压垮源站。
+
+#### HLS 缺点
+
+1. 有切片延迟
+   - 分片一般 2~10 秒，直播延迟普遍 5~20 秒，不适合低延时实时互动场景（连麦、实时对讲）。
+2. TS 分片冗余偏大
+   - 传统 TS 分片头部冗余多，相比 fMP4/DASH 流量略高。
+
+#### HLS 与 DASH对比
+
+| 协议 | 索引文件 | 分片格式       | 生态优势                     | 典型适用场景                                   |
+|------|----------|----------------|------------------------------|------------------------------------------------|
+| HLS  | m3u8     | MPEG-TS / fMP4 | 苹果原生、CDN 最成熟、全平台兼容 | 点播、常规直播、苹果生态、小程序 / H5、安防网页预览 |
+| DASH | MPD      | fMP4           | 国际标准、自适应更强、冗余更小 | Web 标准项目、自适应直播、追求低流量的新项目     |
+
+#### HLS相关问题
+
+**1) 4K / 10GB 电影会不会 OOM？**
+
+HLS碎片接收加载, Android用ExoPlayer播放. 4K / 10GB 电影会不会 OOM?是把10G全部加载到内存吗?为什么我来回拖拽也能快速跳转指定位置 ?
+
+* HLS 协议采用分片机制:
+  - HLS 将完整大视频切分为大量2~10 秒的小型 .ts 分片，单个分片仅几百 KB 到几 MB，从协议设计上避免了一次性加载超大文件。
+* ExoPlayer 流式加载，不会全量加载:
+  - 播放时只下载当前播放分片和少量预加载分片，不下载全片；
+  - 解码完成的分片会立即从内存释放，内存中始终只保留 2~3 个分片；
+  - 内存占用稳定在几十 MB，与视频总大小无关，播放 4K / 10GB 视频也不会 OOM。
+* 能够快速拖拽跳转的原因
+  - HLS 的 m3u8 文件记录了时间点与分片的对应关系，支持随机定位；
+  - ExoPlayer 会把已下载的分片缓存到手机外存（闪存）；
+  - 拖拽时直接通过索引找到目标分片，若已缓存则本地直接读取、秒开；
+  - 断网后仍然可以在已缓存的区间内自由拖拽播放。
+
+
+#### 本项目中的HLS
+
+**1) 后端生成HLS**
+
+后端 `VideoMediaServiceImpl.ensureVideoArtifacts`
+
+- 首先数据源来自于前端的分片上传mp4：
+```java
+// 分片上传
+@PostMapping("/upload/chunk")
+public BaseResponse<VideoUploadChunkResponse> uploadChunk(
+        @RequestParam("sessionId") String sessionId,
+        @RequestParam("offset") Long offset,
+        @RequestParam("chunkFile") MultipartFile chunkFile
+){
+   return videoMediaService.uploadChunk(sessionId.trim(), offset, chunkFile);
+}
+// 上传完成存储minio
+@PostMapping("/upload/complete")
+public BaseResponse<VideoUploadCompleteResponse> completeUpload(
+        @RequestParam("sessionId") String sessionId
+) {
+  Path sessionDir = getUploadSessionDir(sessionId);
+  Path metaFile = sessionDir.resolve("meta.properties");
+  Path partFile = sessionDir.resolve("upload.part");
+  SessionMeta meta = readSessionMeta(metaFile);
+  
+  // 上传minio
+  BatchUploadResult uploadResult = ossService.uploadLocalFiles(
+          List.of(completedFile.toFile()),
+          meta.userId,
+          meta.bucketName
+  );
+  
+  // 抽视频封面帧存储minio （参考FFmpeg章节）
+  return generateCover(localVideoPath, coverPath, fileWorkDir);
+}
+```
 上传完成后若 MinIO 尚无 HLS，则本地调用 **ffmpeg** 生成切片并上传：
 
 ```java
@@ -2853,14 +2962,34 @@ runCommand(List.of(
 ), fileWorkDir);
 ```
 
-- **`hls_time 6`**：目标约 6 秒一片（实际按关键帧对齐）。  
+- **`hls_time 6`**：目标约 6 秒一片（实际按关键帧对齐）。
 - **`hls_list_size 0`**：m3u8 保留 **全部** 分片列表（适合点播完整列表；直播常用滑动窗口）。
 
 封面：`ffmpeg -ss 00:00:01 -i ... -frames:v 1 cover.jpg`。  
 元数据：`ffprobe` 取时长与码率。
 
-**2) HLS 离线合并为 MP4（`convertHlsToMp4`）**
+**2) HLS传输与播放**
 
+Docker 内 Nginx管理清晰度列表
+`nginx-docker/conf/nginx.conf` 中 **`exec ffmpeg`** 把 **RTMP 直播** 转成 **多档 RTMP → HLS**，与上面「点播 mp4 转 HLS」是 **不同业务入口**，但都产出 **m3u8 + ts**。
+
+
+Android 本地播放 `LocalHlsPlayerActivity`
+
+```java
+player = new ExoPlayer.Builder(this).build();
+playerView.setPlayer(player);
+player.setMediaItem(MediaItem.fromUri(Uri.fromFile(playlistFile)));
+player.prepare();
+player.play();
+```
+
+即用 **file://** 指向缓存目录下的 **index.m3u8**。
+
+**3) Android将m3u8转为Mp4**
+
+
+HLS 离线合并为 MP4（`convertHlsToMp4`）
 将本地缓存的 `index.m3u8` **无缝封装**为单个 MP4（不重编码，速度快）：
 
 ```java
@@ -2878,44 +3007,6 @@ runCommand(List.of(
 
 合并后的文件上传 MinIO，供 `/video/cloud/download/hls-mp4` 下载。
 
-**3) Docker 内 Nginx-RTMP 另一条路径**
-
-`nginx-docker/conf/nginx.conf` 中 **`exec ffmpeg`** 把 **RTMP 直播** 转成 **多档 RTMP → HLS**，与上面「点播 mp4 转 HLS」是 **不同业务入口**，但都产出 **m3u8 + ts**。
-
-**4) Android 本地播放 `LocalHlsPlayerActivity`**
-
-```java
-player = new ExoPlayer.Builder(this).build();
-playerView.setPlayer(player);
-player.setMediaItem(MediaItem.fromUri(Uri.fromFile(playlistFile)));
-player.prepare();
-player.play();
-```
-
-即用 **file://** 指向缓存目录下的 **index.m3u8**。
-
-**5) HLS 下的 IBP 与 RTMP/RTSP 区别**
-
-- **IBP** 由 **编码器**决定（`libx264` 参数等），与封装格式无关。  
-- **HLS** 只是 **容器切片 + HTTP 分发**；RTMP/RTSP 是 **传输与会话**。同一编码内容可 **转封装** 为多种协议。
-
-**6) 4K / 10GB 电影会不会 OOM？**
-
-HLS碎片接收加载, Android用ExoPlayer播放. 4K / 10GB 电影会不会 OOM?是把10G全部加载到内存吗?为什么我来回拖拽也能快速跳转指定位置 ?
-
-* HLS 协议采用分片机制:
-  - HLS 将完整大视频切分为大量2~10 秒的小型 .ts 分片，单个分片仅几百 KB 到几 MB，从协议设计上避免了一次性加载超大文件。
-* ExoPlayer 流式加载，不会全量加载: 
-  - 播放时只下载当前播放分片和少量预加载分片，不下载全片；
-  - 解码完成的分片会立即从内存释放，内存中始终只保留 2~3 个分片；
-  - 内存占用稳定在几十 MB，与视频总大小无关，播放 4K / 10GB 视频也不会 OOM。
-* 能够快速拖拽跳转的原因
-  - HLS 的 m3u8 文件记录了时间点与分片的对应关系，支持随机定位；
-  - ExoPlayer 会把已下载的分片缓存到手机外存（闪存）；
-  - 拖拽时直接通过索引找到目标分片，若已缓存则本地直接读取、秒开；
-  - 断网后仍然可以在已缓存的区间内自由拖拽播放。
-
----
 
 ### 播放原理（ExoPlayer 底层）
 
@@ -3174,5 +3265,122 @@ PeerConnection pc = factory.createPeerConnection(rtcConfig, constraints, observe
 
 #### 基本功能
 
-见上文「FFmpeg 在流媒体中的常见职能」与「项目中 FFmpeg 职能清单」。
+
+服务器注入ffmpeg：
+```java
+  @Value("${video.ffmpeg-bin:ffmpeg}")
+  private String ffmpegBin;
+
+  @Value("${video.ffprobe-bin:ffprobe}")
+  private String ffprobeBin;
+
+  @Value("${video.work-dir:./video-work}")
+  private String videoWorkDir;
+```
+```yaml
+video:
+  ffmpeg-bin: ffmpeg
+  ffprobe-bin: ffprobe
+  work-dir: ./video-work
+```
+
+服务器执行指令代码（用于命令行调用ffmpeg）
+```java
+    private String runCommand(List<String> command, Path workingDir) {
+        ProcessBuilder processBuilder = new ProcessBuilder(command);
+        if (workingDir != null) {
+            processBuilder.directory(workingDir.toFile());
+        }
+        processBuilder.redirectErrorStream(true);
+        try {
+            Process process = processBuilder.start();
+            String output;
+            try (InputStream inputStream = process.getInputStream()) {
+                output = new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
+            }
+            int code = process.waitFor();
+            if (code != 0) {
+                throw new IllegalStateException("command failed(" + code + "): " + String.join(" ", command) + "\n" + output);
+            }
+            return output;
+        } catch (IOException e) {
+            throw new UncheckedIOException("command io failed: " + String.join(" ", command), e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("command interrupted", e);
+        }
+    }
+```
+
+**1) 视频抽帧**
+
+命令行
+```shell
+ffmpeg -y -ss 00:00:01 -i source.mp4 -frames:v 1 cover.jpg
+```
+
+```text
+ffmpeg 
+-y                    覆盖输出文件
+-ss 00:00:01          定位到视频第 1 秒
+-i source.mp4         输入视频文件
+-frames:v 1           只输出 1 帧图像
+cover.jpg             输出封面图片
+```
+
+FFmpeg 核心库
+```text
+1. libavformat：解封装输入视频，读取流信息、定位到指定时间戳
+2. libavcodec：解码视频帧，编码输出 JPG/PNG 图像
+3. libswscale：图像格式转换（YUV → RGB）
+4. libavutil：工具支持（时间计算、内存管理）
+```
+
+SpringBoot服务器在上传完成视频之后会对Mp4进行抽帧
+```java
+    /**
+     * 生成视频封面图
+     * 上传 MP4 完成后，调用 FFmpeg 从视频中抽取一帧图片作为封面
+     * 优先抽取第 1 秒的画面，失败则回退到第 0 秒（首帧）
+     *
+     * @param sourcePath 源视频路径（MP4）
+     * @param coverPath  生成的封面图保存路径
+     * @param workDir    FFmpeg 执行工作目录
+     */
+    private void generateCover(Path sourcePath, Path coverPath, Path workDir) {
+        try {
+            // 第一次尝试：截取视频第 1 秒作为封面（避免第 0 秒全黑）
+            runCommand(List.of(
+                    ffmpegBin,        // FFmpeg 可执行文件路径
+                    "-y",             // 覆盖已存在的输出文件，不询问
+                    "-ss",            // 指定截取时间点
+                    "00:00:01",       // 截取第 1 秒的画面
+                    "-i",             // 指定输入文件
+                    sourcePath.toString(),
+                    "-frames:v",      // 指定抽取的视频帧数
+                    "1",              // 只抽取 1 帧
+                    coverPath.toString()  // 输出封面图片路径
+            ), workDir);
+        } catch (Exception first) {
+            // 第 1 秒截取失败（如视频过短），回退到截取第 0 秒（首帧）
+            runCommand(List.of(
+                    ffmpegBin,
+                    "-y",
+                    "-ss",
+                    "00:00:00",      // 回退到视频起始帧
+                    "-i",
+                    sourcePath.toString(),
+                    "-frames:v",
+                    "1",
+                    coverPath.toString()
+            ), workDir);
+        }
+
+        // 校验：如果封面文件没有生成，直接抛出异常
+        if (!Files.exists(coverPath)) {
+            throw new IllegalStateException("cover file not generated");
+        }
+    }
+```
+
 
