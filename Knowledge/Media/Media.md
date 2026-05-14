@@ -192,7 +192,12 @@ private void startBackgroundThread() {
   mBackgroundHandler = new Handler(mBackgroundThread.getLooper());
 }
 
-cameraManager.openCamera(mCameraId, mDeviceStateCallback, mBackgroundHandler);
+/**
+ * 申请并打开 camera 设备。
+ */
+private void openCamera() {
+    cameraManager.openCamera(mCameraId, mDeviceStateCallback, mBackgroundHandler);
+}
 ```
 1. cameraId：从cameraManager获取的CameraId, 一般来说:（后置0/前置1）。
 2. StateCallback：相机状态异步回调，接收相机打开成功、失败、断开的事件，是Camera2的核心通信接口。
@@ -204,30 +209,40 @@ cameraManager.openCamera(mCameraId, mDeviceStateCallback, mBackgroundHandler);
 
 创建【预览请求构造器】 CaptureRequest.Builder 并请求预览
 ```java
-// 4. 创建【预览请求构造器】，类型为预览模式 TEMPLATE_PREVIEW
-mPreviewRequestBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+/**
+ * 创建预览会话并把输出绑定到 TextureView + ImageReader。
+ */
+private void createCameraPreviewSession() {
+    // 4. 创建【预览请求构造器】，类型为预览模式 TEMPLATE_PREVIEW
+    mPreviewRequestBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
 
-// 5. 设置自动对焦模式：连续图片对焦（相机预览最常用）
-mPreviewRequestBuilder.set(
-  CaptureRequest.CONTROL_AF_MODE,
-  CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+    // 5. 设置自动对焦模式：连续图片对焦（相机预览最常用）
+    mPreviewRequestBuilder.set(
+      CaptureRequest.CONTROL_AF_MODE,
+      CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+}
 ```
 
 将数据源给到需要的地方: TextureView(显示) + ImageReader(数据回调)
 
 TextureView(显示)
 ```java
-// 0. UI获取 TextureView
-texturePreview = findViewById(R.id.texturePreview);
-// 1. 从 TextureView 获取 SurfaceTexture（GPU纹理载体）
-SurfaceTexture texture = mTextureView.getSurfaceTexture();
-// 2. 设置纹理缓冲区大小 = 相机预览分辨率（必须匹配，否则画面变形）
-texture.setDefaultBufferSize(mPreviewSize.getWidth(), mPreviewSize.getHeight());
+/**
+ * 创建预览会话并把输出绑定到 TextureView + ImageReader。
+ */
+private void createCameraPreviewSession() {
+    // 0. UI获取 TextureView
+    texturePreview = findViewById(R.id.texturePreview);
+    // 1. 从 TextureView 获取 SurfaceTexture（GPU纹理载体）
+    SurfaceTexture texture = mTextureView.getSurfaceTexture();
+    // 2. 设置纹理缓冲区大小 = 相机预览分辨率（必须匹配，否则画面变形）
+    texture.setDefaultBufferSize(mPreviewSize.getWidth(), mPreviewSize.getHeight());
 
-// 3. 通过 SurfaceTexture 创建 Surface（相机输出的渲染目标）
-Surface surface = new Surface(texture);
-// 6. 添加第一个输出目标：Surface → 渲染到 TextureView 给人看
-mPreviewRequestBuilder.addTarget(surface);
+    // 3. 通过 SurfaceTexture 创建 Surface（相机输出的渲染目标）
+    Surface surface = new Surface(texture);
+    // 6. 添加第一个输出目标：Surface → 渲染到 TextureView 给人看
+    mPreviewRequestBuilder.addTarget(surface);
+}
 ```
 
 ImageReader(数据回调)
@@ -245,28 +260,41 @@ ImageReader mImageReader = ImageReader.newInstance(
                 ImageFormat.YUV_420_888,    // 参数3：图像数据格式（安卓标准YUV）
                 2                           // 参数4：缓冲区最大帧数（2~3帧最稳定）
         );
-// 创建 ImageReader 帧可用监听器
-mImageReader.setOnImageAvailableListener(new OnImageAvailableListenerImpl(), mBackgroundHandler);
-// 7. 添加第二个输出目标：ImageReader → 获取YUV原始数据给推流/编码用
-mPreviewRequestBuilder.addTarget(mImageReader.getSurface());
+
+/**
+ * 按 cameraId 读取分辨率、ImageReader、方向等关键参数。
+ */
+private boolean configCameraParams(CameraManager manager, String cameraId) throws CameraAccessException {
+    // 创建 ImageReader 帧可用监听器
+    mImageReader.setOnImageAvailableListener(new OnImageAvailableListenerImpl(), mBackgroundHandler);
+    // 7. 添加第二个输出目标：ImageReader → 获取YUV原始数据给推流/编码用
+    mPreviewRequestBuilder.addTarget(mImageReader.getSurface());
+}
 ```
 
 创建相机捕获会话
 ```java
-// 8. 创建相机捕获会话（Camera2 真正开始预览的关键）
-// 传入两个输出目标：预览显示 + 数据采集
-// mCaptureStateCallback：会话状态回调
-// mBackgroundHandler：在后台线程执行，不卡UI
-mCameraDevice.createCaptureSession(
-        Arrays.asList(surface, mImageReader.getSurface()),
-        mCaptureStateCallback,
-        mBackgroundHandler);
+/**
+ * 会话配置成功（相机已经准备好，可以开始预览）
+ */
+@Override
+public void onConfigured(@NonNull CameraCaptureSession cameraCaptureSession) {
+    // 8. 创建相机捕获会话（Camera2 真正开始预览的关键）
+    // 传入两个输出目标：预览显示 + 数据采集
+    // mCaptureStateCallback：会话状态回调
+    // mBackgroundHandler：在后台线程执行，不卡UI
+    mCameraDevice.createCaptureSession(
+            Arrays.asList(surface, mImageReader.getSurface()),
+            mCaptureStateCallback,
+            mBackgroundHandler);
 
-// Camera2Helper：会话就绪后连续请求 PREVIEW 帧
-        mCaptureSession.setRepeatingRequest(
-        mPreviewRequestBuilder.build(),
-        new CameraCaptureSession.CaptureCallback() { },
-mBackgroundHandler);
+    // Camera2Helper：会话就绪后连续请求 PREVIEW 帧
+    mCaptureSession.setRepeatingRequest(
+            mPreviewRequestBuilder.build(),
+            new CameraCaptureSession.CaptureCallback() {
+            },
+            mBackgroundHandler);
+}
 ```
 
 **5) YUV数据处理**
@@ -862,10 +890,12 @@ gantt
 **图 A 对照代码（线程启动证据）**
 
 ```java
-// LivePushDemoActivity.startLivePush：启动音频采集线程
-audioCaptureTask = new AudioCaptureTask(livePusherBridge);
-audioCaptureTask.start();
-
+@RequiresPermission(Manifest.permission.RECORD_AUDIO)
+private void startLivePush() {
+    // LivePushDemoActivity.startLivePush：启动音频采集线程
+    audioCaptureTask = new AudioCaptureTask(livePusherBridge);
+    audioCaptureTask.start();
+}
 // AudioCaptureTask.start：线程名 live-audio-capture
 private void start() {
     running = true;
@@ -886,8 +916,14 @@ private void startBackgroundThread() {
     mBackgroundHandler = new Handler(mBackgroundThread.getLooper());
 }
 
-// ImageReader 回调明确挂在 CameraBackground 的 handler 上
-mImageReader.setOnImageAvailableListener(new OnImageAvailableListenerImpl(), mBackgroundHandler);
+/**
+ * 按 cameraId 读取分辨率、ImageReader、方向等关键参数。
+ */
+private boolean configCameraParams(CameraManager manager, String cameraId) throws CameraAccessException {
+    // ImageReader 回调明确挂在 CameraBackground 的 handler 上
+    // 创建 ImageReader 帧可用监听器
+    mImageReader.setOnImageAvailableListener(new OnImageAvailableListenerImpl(), mBackgroundHandler);
+}
 ```
 
 ```c++
@@ -949,16 +985,19 @@ private void startPullPlay() {
 
 ```java
 // LivePullDemoActivity：播放状态可观察到 Buffering -> Ready（对应图里的 IO/解码/渲染阶段）
-player.addListener(new Player.Listener() {
+private void addListener() {
+  player.addListener(new Player.Listener() {
     @Override
     public void onPlaybackStateChanged(int playbackState) {
-        if (playbackState == Player.STATE_BUFFERING) {
-            updateStatus("缓冲中...");
-        } else if (playbackState == Player.STATE_READY) {
-            updateStatus("播放中，直播延迟: ...");
-        }
+      if (playbackState == Player.STATE_BUFFERING) {
+        updateStatus("缓冲中...");
+      } else if (playbackState == Player.STATE_READY) {
+        updateStatus("播放中，直播延迟: ...");
+      }
     }
-});
+  });
+}
+
 ```
 
 > 说明：图 B 是播放器通用线程模型示意；本项目业务代码不直接 new IO/解码线程，实际线程拆分由 ExoPlayer 内部管理。
@@ -1047,18 +1086,21 @@ gantt
 
 ```java
 // LivePullDemoActivity：RTSP 分支显式使用 RtspMediaSource（RTP over TCP）
-if (isRtspUrl(pullUrl)) {
-    applyRtspPlaybackPreference(true);
-    RtspMediaSource mediaSource = new RtspMediaSource.Factory()
-            .setForceUseRtpTcp(true)
-            .createMediaSource(MediaItem.fromUri(uri));
-    player.setMediaSource(mediaSource);
-} else {
-    applyRtspPlaybackPreference(false);
-    player.setMediaItem(MediaItem.fromUri(uri));
+@OptIn(markerClass = UnstableApi.class)
+private void startPullPlay() {
+    if (isRtspUrl(pullUrl)) {
+        applyRtspPlaybackPreference(true);
+        RtspMediaSource mediaSource = new RtspMediaSource.Factory()
+                .setForceUseRtpTcp(true)
+                .createMediaSource(MediaItem.fromUri(uri));
+        player.setMediaSource(mediaSource);
+    } else {
+        applyRtspPlaybackPreference(false);
+        player.setMediaItem(MediaItem.fromUri(uri));
+    }
+    player.prepare();
+    player.play();
 }
-player.prepare();
-player.play();
 ```
 
 ```java
@@ -1095,28 +1137,33 @@ Android **MediaCodec** 是对底层 **硬件音视频编解码器** 的统一封
 // 创建 H.264 编码器
 MediaCodec codec = MediaCodec.createEncoderByType(MediaFormat.MIME_TYPE_VIDEO_AVC);
 MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIME_TYPE_VIDEO_AVC, width, height);
-format.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);           // 目标码率（bps）
-format.setInteger(MediaFormat.KEY_FRAME_RATE, frameRate);       // 帧率
-format.setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat);   // 厂商支持的 YUV 格式（如 NV12）
-format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2);       // 关键帧间隔（秒，语义依厂商）
-format.setInteger(MediaFormat.KEY_BITRATE_MODE,
-        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);   // CBR/VBR 等
-codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-codec.start();
+private void initCodec() {
+  format.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);           // 目标码率（bps）
+  format.setInteger(MediaFormat.KEY_FRAME_RATE, frameRate);       // 帧率
+  format.setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat);   // 厂商支持的 YUV 格式（如 NV12）
+  format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2);       // 关键帧间隔（秒，语义依厂商）
+  format.setInteger(MediaFormat.KEY_BITRATE_MODE,
+  MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);   // CBR/VBR 等
+
+  codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+  codec.start();
+}
 ```
 
 ```java
 // 输入一帧（presentationTimeUs 与音频时间对齐）
-int inIx = codec.dequeueInputBuffer(timeoutUs);
-if (inIx >= 0) {
-    ByteBuffer inBuf = codec.getInputBuffer(inIx);
-    inBuf.clear();
-    inBuf.put(nv12OrOther); // 按协商的 colorFormat 填入
-    codec.queueInputBuffer(inIx, 0, size, presentationTimeUs, 0);
+private void encodeOneFrame(byte[] nv12OrOther, long presentationTimeUs) {
+    int inIx = codec.dequeueInputBuffer(timeoutUs);
+    if (inIx >= 0) {
+      ByteBuffer inBuf = codec.getInputBuffer(inIx);
+      inBuf.clear();
+      inBuf.put(nv12OrOther); // 按协商的 colorFormat 填入
+      codec.queueInputBuffer(inIx, 0, size, presentationTimeUs, 0);
+    }
+    // 取出编码后的压缩帧
+    MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+    int outIx = codec.dequeueOutputBuffer(info, timeoutUs);
 }
-// 取出编码后的压缩帧
-MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-int outIx = codec.dequeueOutputBuffer(info, timeoutUs);
 ```
 
 **2) 硬编与组成原理、软编的关系**
@@ -1480,15 +1527,21 @@ graph TD
 代码摘录（Java 采集并上送 PCM）：
 ```java
 // LivePushDemoActivity.AudioCaptureTask.run
-while (running && pushing) {
-    int len = audioRecord.read(buffer, 0, buffer.length); // 从 MIC 读取 PCM
-    if (len <= 0) continue;                                // 读失败/无数据跳过
-    if (len == buffer.length) {
-        bridge.pushAudioFrame(buffer.clone());             // 满帧直接送 JNI
-    } else {
-        byte[] exact = new byte[len];                      // 尾帧不足时裁剪
-        System.arraycopy(buffer, 0, exact, 0, len);        // 避免上传脏字节
-        bridge.pushAudioFrame(exact);                      // 送到 native 编码
+/**
+ * 采集循环：持续读取 PCM 并送入 SDK。
+ */
+@Override
+public void run() {
+    while (running && pushing) {
+        int len = audioRecord.read(buffer, 0, buffer.length); // 从 MIC 读取 PCM
+        if (len <= 0) continue;                                // 读失败/无数据跳过
+        if (len == buffer.length) {
+            bridge.pushAudioFrame(buffer.clone());             // 满帧直接送 JNI
+        } else {
+            byte[] exact = new byte[len];                      // 尾帧不足时裁剪
+            System.arraycopy(buffer, 0, exact, 0, len);        // 避免上传脏字节
+            bridge.pushAudioFrame(exact);                      // 送到 native 编码
+        }
     }
 }
 ```
@@ -1536,8 +1589,16 @@ if (byteLen > 0) {
 代码摘录（Java 视频入口）：
 ```java
 // LivePushDemoActivity.onPreviewFrame
-if (!pushing || livePusherBridge == null) return;    // 未推流直接丢帧
-livePusherBridge.pushVideoFrame(yuvData, LiveFrameFormat.I420); // I420 -> JNI
+/**
+ * Camera2 帧回调：把 I420 帧送入 SDK 进行编码并推送。
+ *
+ * @param yuvData I420 视频帧
+ */
+@Override
+public void onPreviewFrame(byte[] yuvData) {
+    if (!pushing || livePusherBridge == null) return;    // 未推流直接丢帧
+    livePusherBridge.pushVideoFrame(yuvData, LiveFrameFormat.I420); // I420 -> JNI
+}
 ```
 解释：Camera2 回调的 I420 帧进入 `LivePusherBridge`，之后由 native 侧完成编码和打包。
 
@@ -2088,7 +2149,7 @@ flowchart TD
 逻辑活动图
 ```mermaid
 flowchart TD
-  S["<b>开始</b><br/>点击"开始文件推流""] --> T["校验 inputPath / outputUrl"]
+  S["<b>开始</b><br/>点击“开始文件推流”"] --> T["校验 inputPath / outputUrl"]
 T --> U{"outputUrl 协议?"}
 U -->|"rtsp://"| V_rtsp["RTSP 推流<br/>pushStreamAsync"]
 U -->|"rtmp://"| V_rtmp["RTMP 推流<br/>pushStreamAsync"]
