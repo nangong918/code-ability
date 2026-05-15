@@ -1,4 +1,4 @@
-# Android Framework
+# AOSP
 
 > 官方架构入口：[Android Open Source Project — Architecture](https://source.android.com/docs/core/architecture)。
 
@@ -261,7 +261,48 @@ graph TB
 
 系统侧 JNI、HAL C++、厂商闭源 `.so`；应用 JNI 见 [JNI.md](../Android/JNI.md)。
 
----
+
+## Android Framework
+
+大致介绍：
+
+**一、四大核心系统服务（最关键）**
+AMS（ActivityManagerService）：Activity/Service/ 进程 / 任务栈管理、应用生命周期、系统进程调度
+PMS（PackageManagerService）：APK 安装 / 卸载 / 解析、权限管理、应用信息查询、组件注册
+WMS（WindowManagerService）：窗口管理、界面布局、Surface 管理、View 渲染、输入事件分发
+Binder IPC：跨进程通信核心（Framework 底层通信基石，AMS/PMS/WMS 都靠它）
+
+**二、四大组件框架**
+Activity：界面交互、生命周期、UI 容器
+Service：后台服务、长任务、进程保活
+BroadcastReceiver：跨进程消息、系统事件监听（开机、网络、电量）
+ContentProvider：跨进程数据共享、数据访问封装
+
+**三、基础通信与跳转**
+Intent / IntentFilter：组件跳转、消息路由、跨进程行为触发、隐式匹配
+
+**四、UI 体系**
+View 体系：View/ViewGroup、事件分发、UI 绘制、渲染流程、自定义 View
+ResourceManager：资源管理（布局、图片、字符串、颜色、尺寸）
+
+**五、系统能力服务**
+NotificationManager：通知管理、状态栏消息、悬浮通知
+PowerManager：电源管理、休眠、亮灭屏、唤醒锁、省电策略
+AlarmManager：定时任务、闹钟、定时唤醒
+ConnectivityManager：网络管理、Wi-Fi / 移动数据、网络状态监听
+TelephonyManager：电话管理、SIM 卡、通话状态、信号
+LocationManager：定位服务、GPS / 网络定位、位置更新
+AudioManager：音频管理、音量、铃声、音频焦点、音频路由
+
+
+### 四大核心系统服务
+```java
+import android.app.ActivityManager;
+import android.content.pm.PackageManager;
+import android.view.WindowManager;
+```
+
+
 ## 场景
 ### 需要修改AOSP
 
