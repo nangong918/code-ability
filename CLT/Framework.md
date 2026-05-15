@@ -7,7 +7,7 @@
 1. Linux Kernel 层：驱动、电源、内存、网络、Binder
 2. HAL 硬件抽象层：隔离内核与Framework，硬件厂商对接
 3. Native 层：C/C++库，如OpenGL、SQLite、WebKit、媒体库、ART虚拟机
-4. Android Framework 层（Java框架层）：你重点要背的
+4. Android Framework 层（Java框架层）
 
 二、Android Framework 层（Java 核心服务）
 1. Activity Manager Service (AMS)：Activity、Service、进程管理

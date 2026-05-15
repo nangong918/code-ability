@@ -1,11 +1,118 @@
 # Android Framework
 
-> **定位**：**非典型 App 层开发**——面向 **AOSP、系统服务、HAL 交界、嵌入式 / 行业设备定制**。与 [Android.md](../Android/Android.md)（应用总览）、[IPC.md](../Android/IPC.md)（Binder 细节）配合阅读。  
 > 官方架构入口：[Android Open Source Project — Architecture](https://source.android.com/docs/core/architecture)。
+
+## 目录
+
+
 
 ---
 
 ## AOSP 软件栈（自顶向下）
+
+```text
+App（APK）
+   ↓（直接调用）
+Framework（Java，AOSP 的一部分）
+   ↓（JNI 调用）
+Native（C/C++，AOSP 的一部分）
+   ↓
+HAL（硬件抽象层，AOSP 的一部分）
+   ↓
+Kernel（Linux 内核，不属于 AOSP 源码包）
+```
+
+```mermaid
+graph TB
+    subgraph 用户空间["用户空间"]
+        
+        subgraph 应用层["应用层 (App Layer)"]
+            SystemApps["系统应用<br/>Settings / SystemUI"]
+            PrebuiltAPKs["预装APK"]
+            ThirdApps["第三方应用"]
+        end
+
+        subgraph Framework["Android Framework (Java/Kotlin API)"]
+            AndroidAPI["android.* / java.*"]
+            SystemServer["system_server<br/>• Binder服务端<br/>• AMS / WMS / PMS"]
+            HiddenAPI["Hidden API<br/>（系统应用/反射调用）"]
+        end
+
+        subgraph Runtime["Android Runtime (ART)"]
+            ART["ART 实例<br/>（每个应用进程独立）"]
+            DEX["DEX字节码"]
+            AOT_JIT["AOT / JIT 编译"]
+            GC["垃圾回收 (GC)"]
+            JNI["JNI 接口"]
+        end
+
+        subgraph Native["Native 框架与守护进程"]
+            SurfaceFlinger["SurfaceFlinger<br/>（图层合成）"]
+            AudioServer["audioserver"]
+            CameraServer["cameraserver"]
+            MediaExtractor["mediaextractor"]
+            Logd["logd"]
+            ServiceManager["servicemanager"]
+            Vold["vold"]
+            Installd["installd"]
+        end
+
+        subgraph HAL["Hardware Abstraction Layer (HAL)"]
+            AudioHAL["Audio HAL"]
+            CameraHAL["Camera HAL"]
+            GraphicsHAL["Graphics HAL"]
+            SensorsHAL["Sensors HAL"]
+            OtherHAL["其他硬件域接口"]
+        end
+
+    end
+
+    subgraph 内核空间["内核空间"]
+        subgraph Kernel["Linux Kernel"]
+            Scheduler["进程/线程调度器"]
+            Memory["内存管理"]
+            Network["网络栈"]
+            Binder["Binder驱动"]
+            DMA["DMA-BUF"]
+            CharDev["字符设备驱动"]
+        end
+    end
+
+    subgraph 硬件["硬件层"]
+        Hardware["物理硬件<br/>CPU / GPU / 摄像头 / 音频 / 显示屏等"]
+    end
+
+    %% ===== 调用关系 =====
+    应用层 -->|"直接调用<br/>SDK / Hidden API"| Framework
+    Framework -->|"Binder IPC"| SystemServer
+    Framework -->|"JNI调用"| Runtime
+    Runtime -->|"JNI调用"| Native
+
+    Framework -->|"Binder调用"| Native
+    应用层 -->|"直接调用<br/>（部分场景）"| Native
+
+    Native -->|"HAL接口调用"| HAL
+    HAL -->|"ioctl / read / write"| Kernel
+
+    Kernel -->|"驱动硬件"| 硬件
+
+    %% ===== 同层关系标注 =====
+    Runtime -->|"进程隔离"| ART
+
+    %% 样式
+    style 应用层 fill:#e1f5fe,stroke:#0288d1
+    style Framework fill:#e3f2fd,stroke:#1565c0
+    style Runtime fill:#e8f5e9,stroke:#2e7d32
+    style Native fill:#fff3e0,stroke:#f57c00
+    style HAL fill:#fce4ec,stroke:#c62828
+    style Kernel fill:#f3e5f5,stroke:#7b1fa2
+    style 硬件 fill:#eeeeee,stroke:#616161
+
+    style SystemServer fill:#bbdef5,stroke:#0d47a1
+    style ART fill:#c8e6c9,stroke:#1b5e20
+    style SurfaceFlinger fill:#ffe0b2,stroke:#e65100
+```
+
 
 **应用层**：系统应用（Settings、SystemUI）、预装 APK、第三方应用；使用 SDK / 部分 **hidden API**（系统应用或反射，受限制）。
 
@@ -18,17 +125,6 @@
 **Hardware Abstraction Layer（HAL）**：按硬件域划分接口（Audio、Camera、Graphics…），实现通常在 **vendor** 分区，对接内核驱动。
 
 **Linux Kernel**：进程/线程调度、内存管理、网络栈、Binder 驱动、驱动模型（字符设备、DMA-BUF 等）。
-
----
-
-## 关键设计原则（系统视角）
-
-- **进程隔离**：应用 UID/GID、沙箱；系统服务独立进程（如 `system_server`、`media`）。
-- **Binder IPC**：统一 RPC、能力传递、死亡通知（详 [IPC.md](../Android/IPC.md)）。
-- **HAL 解耦硬件**：Framework 不直接碰驱动；Treble 强化 **vendor / system** 边界。
-- **Zygote 派生应用**：fork 减少冷启动成本（预加载类与资源）。
-
----
 
 ## 启动流程（简化链路）
 
