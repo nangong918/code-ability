@@ -264,7 +264,7 @@ graph TB
 
 ## Android Framework
 
-大致介绍：
+### 大致介绍
 
 **一、四大核心系统服务（最关键）**
 AMS（ActivityManagerService）：Activity/Service/ 进程 / 任务栈管理、应用生命周期、系统进程调度
@@ -301,6 +301,129 @@ import android.app.ActivityManager;
 import android.content.pm.PackageManager;
 import android.view.WindowManager;
 ```
+
+ActivityManagerService (AMS) 、WindowManagerService (WMS) 和 PackageManagerService (PMS) 是三个最核心的系统服务，它们分别管理着应用的生命周期、窗口显示和应用包管理。
+这些服务并不是独立进程，而是运行在同一个系统进程 `system_server` 中
+
+**system_server 是什么？**
+
+由 Zygote 进程孵化（Android 所有进程的父进程）。
+在系统启动时初始化，运行几乎所有核心系统服务。
+通过 Binder IPC 向 App 进程提供跨进程调用（如 IActivityManager）。
+
+#### AMS（ActivityManagerService）
+ActivityManagerService (AMS) ------ 应用生命周期管理者
+AMS 主要负责管理应用的生命周期和任务栈。它处理应用的启动、暂停、恢复、停止等状态。
+它还负责调度系统中的活动（Activity），处理任务切换和多任务管理。
+* 启动/管理 Activity （如 startActivity() 的底层实现）
+* 管理应用进程 （通过 ProcessList 分配进程优先级）
+* 处理 ANR（Application Not Responding）
+* 管理任务栈（TaskStack）（决定 Activity 如何回退）
+
+AMS在Activity中
+```java
+// 示例：在 Activity 中处理生命周期
+public class MainActivity extends AppCompatActivity {
+    
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+        // 初始化代码
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // Activity 恢复到前台
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        // Activity 被置于后台
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        // Activity 被销毁
+    }
+}
+```
+
+#### PMS（PackageManagerService）
+PackageManagerService (PMS) ------ 包管理专家
+PMS 负责管理应用程序的安装、卸载、查询及其权限。
+提供了关于已安装应用的信息，如包名、权限、组件等。
+* 解析 AndroidManifest.xml（获取四大组件信息）
+* 管理应用权限 （如运行时权限 checkSelfPermission()）
+* 处理 APK 安装/卸载 （调用 installd 守护进程）
+
+安装一个 App 时，PMS 会校验签名、分配 UID，并更新 /data/system/packages.xml
+
+```java
+private void checkApk(){
+    // 示例：使用 PackageManager 查询已安装应用
+    PackageManager packageManager = getPackageManager();
+    List<ApplicationInfo> apps = packageManager.getInstalledApplications(PackageManager.GET_META_DATA);
+
+    for (ApplicationInfo app : apps) {
+        Log.d("AppInfo", "App: " + app.packageName);
+    }
+
+    // 获取应用权限
+    try {
+        PackageInfo packageInfo = packageManager.getPackageInfo("com.example.myapp", PackageManager.GET_PERMISSIONS);
+        String[] requestedPermissions = packageInfo.requestedPermissions;
+        if (requestedPermissions != null) {
+            for (String permission : requestedPermissions) {
+                Log.d("Permission", "Permission: " + permission);
+            }
+        }
+    } catch (PackageManager.NameNotFoundException e) {
+        Log.e("Package", "checkApk error: ", e);
+    }
+}
+```
+
+#### WMS（WindowManagerService）
+WindowManagerService (WMS) ------ 窗口管理者
+* 管理窗口层级（Window层级，如 Dialog、Toast、StatusBar）
+* 处理触摸事件分发（决定哪个窗口接收事件）
+* 与 SurfaceFlinger 协作（控制 Surface 的合成与渲染）
+
+WMS 负责窗口的显示和管理，包括布局、动画和用户交互。
+管理系统中的所有窗口，包括活动窗口、对话框、系统提示等。
+
+当滑动屏幕时，WMS 会计算触摸事件应该分发给哪个 App 的哪个窗口。
+
+
+通过 WindowManager 类来进行窗口的管理，比如设置窗口属性、添加自定义窗口等。
+通过 Window 和 View 进行界面的布局和交互。
+
+
+```java
+private void setWindowsParam(){
+    // 示例：使用 WindowManager 添加自定义窗口
+    WindowManager windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+    WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT);
+
+    TextView textView = new TextView(this);
+    textView.setText("This is a custom window");
+    textView.setBackgroundColor(Color.GREEN);
+
+    windowManager.addView(textView, params);
+}
+```
+
+
+#### Binder IPC
 
 
 ## 场景
