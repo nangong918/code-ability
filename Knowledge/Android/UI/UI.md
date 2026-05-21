@@ -219,38 +219,282 @@ fun WeChatDemoScreen(
 
 
 
-#### 1. Tab + ViewPager：`Scaffold` + `HorizontalPager`
+#### 底部 Tab + 横向分页
 
 **XML：** `LinearLayout` 垂直放 `ViewPager2` + 底部 `RadioGroup` / `BottomNavigationView`，`TabLayoutMediator` 同步页码。
 
 **Compose：** 顶栏 + 底栏在 `Scaffold` 的 `topBar` / `bottomBar`；中间 `HorizontalPager` 三页（消息 / 通讯录 / 发现）。Tab 点击与滑动双向同步用两个 `LaunchedEffect`。
 
-```139:210:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
+```kotlin
+/**
+ * 微信主页（单Activity架构下的主页面）
+ * 包含：顶部标题栏 + ViewPager页面 + 底部Navigation
+ *
+ * @param state 页面UI状态（当前选中的Tab）
+ * @param processIntent 发送意图事件（切换Tab）
+ * @param onBackToCatalog 返回上一级页面
+ */
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun WeChatHomePage(
+    state: WeChatUiState,
+    processIntent: (WeChatIntent) -> Unit,
+    onBackToCatalog: () -> Unit,
+) {
+    // 1. 创建ViewPager状态管理器（对应Android ViewPager2）
+    // 初始页 = 当前选中的Tab
+    // 总页数 = Tab数量
     val pagerState = rememberPagerState(
         initialPage = state.activeTab.ordinal,
         pageCount = { WeChatTab.entries.size },
     )
+
+    // 2. 监听外部Tab变化 → 自动滚动ViewPager
+    // 作用：点击底部导航 → 让Pager同步切换页面
     LaunchedEffect(state.activeTab) {
         if (pagerState.currentPage != state.activeTab.ordinal) {
             pagerState.animateScrollToPage(state.activeTab.ordinal)
         }
     }
+    // 3. 监听ViewPager滑动 → 同步更新底部Tab选中状态
+    // 作用：左右滑动页面 → 让底部导航跟着变
     LaunchedEffect(pagerState.currentPage) {
         val tab = WeChatTab.entries[pagerState.currentPage]
         if (tab != state.activeTab) {
             processIntent(WeChatIntent.SelectTab(tab))
         }
     }
-    Scaffold(/* topBar, bottomBar */) { padding ->
-        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize().padding(padding)) { page ->
-            when (WeChatTab.entries[page]) { /* MESSAGES / CONTACTS / DISCOVER */ }
+
+    // Scaffold = 官方标准页面骨架（对应XML里的根布局）
+    // 自带：topBar / bottomBar / content 区域
+    Scaffold(
+        // ---------------------
+        // 顶部标题栏（Toolbar）
+        // ---------------------
+        topBar = {
+            // 水平布局
+            Row(
+                modifier = Modifier
+                    // 填充满宽度
+                    .fillMaxWidth()
+                    .background(Color(0xFF1F1F1F))
+                    // 添加内边距
+                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                // 水平居中
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // 返回按钮
+                TextButton(onClick = onBackToCatalog) { Text("返回", color = Color.White) }
+                Text(
+                    text = "WeChat UI Demo",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                    textAlign = TextAlign.Center,
+                )
+                // 占位，让标题完全居中（平衡左边返回按钮）
+                Spacer(modifier = Modifier.width(60.dp))
+            }
+        },
+        // ---------------------
+        // 底部导航栏（BottomNav）
+        // ---------------------
+        bottomBar = {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFFF6F6F6))
+                    .padding(vertical = 8.dp),
+                // 水平居中
+                horizontalArrangement = Arrangement.SpaceEvenly,
+            ) {
+                // 遍历所有Tab，生成底部导航项
+                WeChatTab.entries.forEach { tab ->
+                    val selected = tab == state.activeTab
+                    Text(
+                        text = tab.toTitle(),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { processIntent(WeChatIntent.SelectTab(tab)) }
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+
+                        // 选中：绿色加粗 / 未选中：灰色普通
+                        color = if (selected) Color(0xFF1AAD19) else Color(0xFF777777),
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                    )
+                }
+            }
+        },
+    ) { padding ->
+        // ---------------------
+        // 页面主体：HorizontalPager = ViewPager2
+        // 左右滑动切换页面
+        // ---------------------
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier
+                .fillMaxSize()
+                // 添加内边距
+                .padding(padding),
+        ) { page ->
+            // 根据Tab生成页面
+            when (WeChatTab.entries[page]) {
+                WeChatTab.MESSAGES -> WeChatMessagesPage(state = state, processIntent = processIntent)
+                WeChatTab.CONTACTS -> WeChatContactsPage(state = state, processIntent = processIntent)
+                WeChatTab.DISCOVER -> WeChatDiscoverPage()
+            }
         }
     }
+}
 ```
+
+```xml
+
+```
+```kotlin
+
+```
+
+* 布局
 
 `Column` ≈ 垂直 `LinearLayout`；`Row` + `Modifier.weight(1f)` ≈ 水平 `layout_weight`。
 
----
+```xml
+<!-- 垂直 -->
+<LinearLayout
+    android:orientation="vertical"></LinearLayout>
+<!-- 水平 -->
+<LinearLayout
+    android:orientation="horizontal"></LinearLayout>
+<!--权重 layout_weight-->
+<TextView
+    android:layout_weight="1"/>
+<!--帧布局（层叠、叠加）-->
+<FrameLayout>
+<!-- 叠加 View -->
+</FrameLayout>
+<!--约束布局-->
+<ConstraintLayout>
+</ConstraintLayout>
+```
+```kotlin
+Column()  // 垂直 → 从上到下
+Row()     // 水平 → 从左到右
+Text(
+    modifier = Modifier.weight(1f)
+)
+// 帧布局（层叠、叠加）
+Box() {
+    // 叠加组件
+}
+// 约束布局
+ConstraintLayout {
+}
+```
+
+* 页面骨架
+
+Scaffold ≈ 整套 XML 页面根布局
+
+```xml
+<LinearLayout>
+    <Toolbar     />  <!-- 顶部 -->
+    <Content     />  <!-- 中间 -->
+    <BottomNav   />  <!-- 底部 -->
+</LinearLayout>
+```
+```kotlin
+Scaffold(
+    topBar = {  },     // 顶部标题栏
+    bottomBar = {  },   // 底部导航
+    floatingActionButton = {  }, // 悬浮按钮
+) { innerPadding ->
+    // 页面内容（自动避开 topBar + bottomBar）
+}
+```
+
+`Scaffold` 就是：自带顶部 + 底部 + 悬浮按钮的页面壳子
+
+* 常用控件
+
+XML → Compose
+
+```text
+TextView        → Text
+Button          → Button
+ImageView       → Image
+EditText        → TextField
+RecyclerView    → LazyColumn
+ScrollView      → Column(Modifier.verticalScroll())
+ViewPager2      → HorizontalPager
+CardView        → Card
+CheckBox        → Checkbox
+Switch          → Switch
+ProgressBar     → CircularProgressIndicator / LinearProgressIndicator
+```
+
+* 宽高匹配 + 边距
+
+```text
+match_parent     → Modifier.fillMaxSize()
+wrap_content     → 什么都不写（默认就是 wrap）
+match_parent 宽  → Modifier.fillMaxWidth()
+match_parent 高  → Modifier.fillMaxHeight()
+```
+
+```xml
+<LinearLayout
+        android:orientation="vertical"
+        android:padding="10dp"
+        android:layout_margin="10dp"></LinearLayout>
+```
+```kotlin
+Modifier.padding(10.dp)   // 内边距
+Modifier.margin(10.dp)    // 外边距
+```
+
+* 圆角、背景
+
+```xml
+<shape>
+    <solid android:color="#fff" />
+    <corners android:radius="10dp" />
+</shape>
+```
+```kotlin
+Modifier
+    .background(Color.White)
+    .clip(RoundedCornerShape(10.dp))
+```
+
+* 列表
+```xml
+<androidx.recyclerview.widget.RecyclerView
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager"/>
+```
+```kotlin
+LazyColumn {
+    items(list) { item ->
+        MessageItem(item)
+    }
+}
+```
+
+* 页面切换
+```kotlin
+// XML
+startActivity(intent)
+
+// Compose
+// 现在只用：
+AnimatedContent(page)
+// 或
+Navigation
+```
+
+
 
 #### 2. 自定义列表项：`ContactMessageItem` + `LazyColumn`
 
