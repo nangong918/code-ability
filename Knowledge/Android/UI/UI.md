@@ -63,7 +63,574 @@
 
 ### Jetpack Compose（KMP）实现
 
-[JetpackComposeUI.md](JetpackComposeUI.md)
+
+#### 补充后的学习目标
+
+
+
+| # | 目标 | XML / 传统 Android 对应 | Compose / KMP 实现要点 |
+|---|------|------------------------|------------------------|
+| 1 | 底部 Tab + 横向分页 | `BottomNavigation` + `ViewPager2` | `Scaffold` + `HorizontalPager` + `rememberPagerState` |
+| 2 | 自定义列表项 | 自定义 `View` + `RecyclerView.Adapter` | 独立 `@Composable`（`ContactMessageItem`）+ `LazyColumn` |
+| 3 | 下拉刷新（假数据） | `SwipeRefreshLayout` | `PullToRefreshBox` + ViewModel `delay` + Toast |
+| 4 | 消息项缩放进/chat 页 | `Activity` 转场 / `sharedElement` | 根导航 `AnimatedContent` + `WeChatTransitionStyle.MESSAGE_ZOOM` |
+| 5 | 聊天顶部的「加载更早消息」 | `RecyclerView` 顶部 + 手势 / `OnScrollListener` | `LazyListState.firstVisibleItemIndex` + `detectVerticalDragGestures` |
+| 6 | 左右两种气泡 | `getItemViewType` + 两种 ViewHolder | `ChatSender` 枚举 + `Row` 的 `Arrangement` 分支 |
+| 7 | 头像放大进详情 | Shared Element / 自定义 Transition | `AVATAR_ZOOM` 的 `scaleIn` / `scaleOut` |
+| 8 | 详情多图左右滑 | `ViewPager` | `HorizontalPager`（头像色块轮播） |
+| 9 | 朋友圈点赞评论实时刷新 | `ViewModel` + `LiveData` / `Observable` | `MutableStateFlow` + `copy` 更新 `momentsByUser` |
+| 10 | 语音通话叠层布局 | `ConstraintLayout` | `Box` + `Modifier.align(Alignment.*)` |
+| 11 | 页面栈复用防 OOM | `FragmentManager` back stack / `singleTop` | `pageStack` + `pushOrReuse` 按 `page.key` 去重 |
+| 12 | **（补充）** 单向数据流 | MVP / 手动 setText | `WeChatIntent` → `processIntent` → `WeChatUiState` |
+| 13 | **（补充）** 列表不在底部提示 | 监听 `RecyclerView` 滚动 | `derivedStateOf` + `AnimatedVisibility`「回到最新消息」 |
+| 14 | **（补充）** UI 本地预览 | Layout Preview | `@Preview` + `VectorDemoTheme`（同文件底部） |
+
+
+
+#### 页面管理
+
+##### 路由和栈管理
+
+原先的XML开发，页面切换是用Activity和Fragment实现，而在Jetpack Compose中只有一个Activity。
+
+原先的XML开发是`AMS` 管 Activity 栈，`FragmentManager` 管 Fragment 栈。
+
+**Activity 栈（AMS）** 
+
+- `startActivity` → 任务栈 **push**；系统返回键 → **pop**。
+- `launchMode`（`singleTop`、`singleTask`）解决「栈里是否重复同一 Activity」——对应本 Demo 内层 `pushOrReuse` 按 `page.key` 去重。
+
+**Fragment 栈**
+
+- 同一窗口里 `replace` + `addToBackStack` 压入 Fragment；返回先 pop Fragment，栈空才 finish Activity。
+- 底部 Tab 常用 `ViewPager2 + Fragment`（不压全局返回栈）；全屏子页才压栈。
+
+**本 Demo 的 WeChat 子导航**
+
+Activity + Fragment 返回栈 + 自定义转场；实现体换成 `@Composable`，栈由 ViewModel 维护。
+
+```kotlin
+object AppNavigator {
+    private val routeStack = MutableStateFlow(listOf(AppRoute.START))
+    fun navigate(route: AppRoute) {
+        val stack = routeStack.value
+        val next = if (stack.lastOrNull() == route) stack else stack + route
+        publishStack(next)
+    }
+    fun goBack(): Boolean { /* dropLast */ }
+}
+```
+
+**Navigation Compose** 指依赖 `androidx.navigation:navigation-compose` 的 `NavHost` / `NavController`——官方路由表、返回栈、Deep Link、与 `NavBackStackEntry` 生命周期绑定。
+
+**本 Demo 外层** 为 KMP 共享，用的是自研轻量栈 + `when`，**不是** `NavHost`：
+
+
+##### Activity
+
+原先的Android开发页面依托于Activity，页面直接的跳转逻辑顺序强依赖于AMS的Activity栈。
+
+而现在使用Jetpack Compose之后，整个App只有一个全局的MainActivity，页面的栈逻辑需要自己进行管理。
+
+Jetpack中页面的切换逻辑基于App，App中会根据route的不同进行Screen切换，直接进行数据据切换而不是页面跳转，取消了冗余的Intent和数据传递。
+
+参考代码：
+```kotlin
+@Composable
+fun App() {
+    VectorDemoTheme {
+        when (route) {
+            AppRoute.START -> StartScreen()
+            AppRoute.LOGIN -> ComposeLoginScreen(
+                state = loginState,
+                savedAccounts = loginDataState.savedUserSessions,
+                processIntent = { loginVm.processIntent(it) },
+            )
+            AppRoute.REGISTER -> ComposeRegisterScreen(
+                state = registerState,
+                processIntent = { registerVm.processIntent(it) },
+            )
+            AppRoute.MAIN -> MainScreen(
+                state = mainState,
+                processIntent = { mainVm.processIntent(it) },
+            )
+            AppRoute.HELLO -> HelloScreen()
+            AppRoute.CHAT -> ChatListScreen(
+                state = chatState,
+                onBack = { AppNavigator.goBack() },
+                onSend = { chatListVm.sendMessage(it) },
+            )
+        }
+    }
+}
+```
+上面代码实现了以`AppNavigator`存储page栈，根据不同的route进行不同的Screen页面跳转（切换）
+
+##### Fragment
+
+**Fragment → Composable（本项目中）**
+
+App的碎片再XML中使用Fragment，而在Jetpack Compose中则使用@Composable组合函数实现。
+
+在Demo中使用的是`AnimatedContent`切换，AnimatedContent 不是一个普通 View，它是「带自动过渡动画的内容切换器」
+
+没有 `FragmentTransaction`；**`currentPage` 一变，`AnimatedContent` 重组出对应 Composable**。
+路由参数用密封类（等同 Fragment `arguments`）：
+
+源码如下：
+```kotlin
+@OptIn(ExperimentalAnimationApi::class)
+@Composable
+fun WeChatDemoScreen(
+    state: WeChatUiState,
+    processIntent: (WeChatIntent) -> Unit,
+    onBackToCatalog: () -> Unit,
+) {
+    AnimatedContent(
+        targetState = state.currentPage,
+        transitionSpec = { weChatTransitionSpec(state.navAction, state.transitionStyle) },
+        label = "wechat-root-nav",
+    ) { page ->
+        when (page) {
+            WeChatPage.Home -> WeChatHomePage(
+                state = state,
+                processIntent = processIntent,
+                onBackToCatalog = onBackToCatalog,
+            )
+            is WeChatPage.Chat -> WeChatChatPage(
+                state = state,
+                userId = page.userId,
+                processIntent = processIntent,
+            )
+            is WeChatPage.Profile -> WeChatProfilePage(
+                state = state,
+                userId = page.userId,
+                processIntent = processIntent,
+            )
+            is WeChatPage.VoiceCall -> WeChatVoiceCallPage(
+                state = state,
+                userId = page.userId,
+                processIntent = processIntent,
+            )
+        }
+    }
+}
+```
+
+
+
+#### 1. Tab + ViewPager：`Scaffold` + `HorizontalPager`
+
+**XML：** `LinearLayout` 垂直放 `ViewPager2` + 底部 `RadioGroup` / `BottomNavigationView`，`TabLayoutMediator` 同步页码。
+
+**Compose：** 顶栏 + 底栏在 `Scaffold` 的 `topBar` / `bottomBar`；中间 `HorizontalPager` 三页（消息 / 通讯录 / 发现）。Tab 点击与滑动双向同步用两个 `LaunchedEffect`。
+
+```139:210:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
+    val pagerState = rememberPagerState(
+        initialPage = state.activeTab.ordinal,
+        pageCount = { WeChatTab.entries.size },
+    )
+    LaunchedEffect(state.activeTab) {
+        if (pagerState.currentPage != state.activeTab.ordinal) {
+            pagerState.animateScrollToPage(state.activeTab.ordinal)
+        }
+    }
+    LaunchedEffect(pagerState.currentPage) {
+        val tab = WeChatTab.entries[pagerState.currentPage]
+        if (tab != state.activeTab) {
+            processIntent(WeChatIntent.SelectTab(tab))
+        }
+    }
+    Scaffold(/* topBar, bottomBar */) { padding ->
+        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize().padding(padding)) { page ->
+            when (WeChatTab.entries[page]) { /* MESSAGES / CONTACTS / DISCOVER */ }
+        }
+    }
+```
+
+`Column` ≈ 垂直 `LinearLayout`；`Row` + `Modifier.weight(1f)` ≈ 水平 `layout_weight`。
+
+---
+
+#### 2. 自定义列表项：`ContactMessageItem` + `LazyColumn`
+
+**XML：** 继承 `RecyclerView.ViewHolder`，在 `item_contact_message.xml` 里摆头像、昵称、预览、时间、红点。
+
+**Compose：** 把一整行拆成可复用 `@Composable`，列表只负责 `items` 循环。
+
+```32:94:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/components/ContactMessageItem.kt
+fun ContactMessageItem(
+    preview: WeChatMessagePreview,
+    contact: WeChatContact?,
+    onClick: () -> Unit,
+    onAvatarClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(...),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        WeChatAvatar(..., onClick = onAvatarClick)
+        Column(modifier = Modifier.weight(1f)) { /* 名称 + 预览 */ }
+        Column(horizontalAlignment = Alignment.End) { /* 时间 + 未读角标 */ }
+    }
+}
+```
+
+消息页挂载（≈ `RecyclerView.setAdapter`）：
+
+```220:238:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
+    PullToRefreshBox(isRefreshing = state.refreshingMessages, onRefresh = { ... }) {
+        LazyColumn {
+            items(state.messagePreviews, key = { it.contactId }) { preview ->
+                ContactMessageItem(
+                    preview = preview,
+                    contact = contact,
+                    onClick = { processIntent(WeChatIntent.OpenChatFromMessage(preview.contactId)) },
+                    onAvatarClick = { processIntent(WeChatIntent.OpenProfileFromAvatar(preview.contactId)) },
+                )
+                Divider(...)
+            }
+        }
+    }
+```
+
+`LazyColumn` ≈ `RecyclerView`；`items(..., key = {})` ≈ stable id，利于复用与动画。
+
+---
+
+#### 3. 下拉刷新（假刷新）
+
+**XML：** 包一层 `SwipeRefreshLayout`，`setOnRefreshListener` 里请求接口。
+
+**Compose：** Material3 `PullToRefreshBox`，刷新状态来自 `state.refreshingMessages`。
+
+ViewModel 侧（2 秒延迟 + Toast，无真实网络）：
+
+```220:227:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
+    private fun refreshMessages() {
+        if (_uiState.value.refreshingMessages) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(refreshingMessages = true) }
+            delay(2000)
+            _uiState.update { it.copy(refreshingMessages = false) }
+            emitEffect(WeChatEffect.ShowToast("刷新成功"))
+        }
+    }
+```
+
+Toast 通过 `Channel` + `WeChatEffect`，在 `App.kt` 的 `LaunchedEffect(weChatDemoVm)` 里接到全局 `toastMessage`——等价于 XML 里 `Activity.runOnUiThread { Toast }`。
+
+---
+
+#### 4. 消息项缩放进入聊天页
+
+**XML：** `ActivityOptions.makeScaleUpAnimation` 或共享元素 Transition。
+
+**Compose：** 打开聊天时 VM 设 `WeChatTransitionStyle.MESSAGE_ZOOM` + `NavAction.PUSH`；`AnimatedContent` 的 `transitionSpec` 用 `scaleIn` / `scaleOut` + `spring`。
+
+```186:187:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
+            is WeChatIntent.OpenChatFromMessage -> openChat(intent.userId, WeChatTransitionStyle.MESSAGE_ZOOM)
+```
+
+```851:866:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
+    WeChatTransitionStyle.MESSAGE_ZOOM -> {
+        if (action == WeChatNavAction.PUSH) {
+            (fadeIn(...) + scaleIn(initialScale = 0.85f, ...)) togetherWith
+                (fadeOut(...) + scaleOut(targetScale = 1.03f, ...))
+        } else { /* POP 反向缩放 */ }
+    }
+```
+
+返回时 `navigateBack()` 对 `WeChatPage.Chat` 同样用 `MESSAGE_ZOOM` 的 POP 分支。
+
+---
+
+#### 5. 聊天列表：顶部下拉加载历史
+
+**XML：** `RecyclerView` 滑到 `position == 0` 且继续下拉时触发加载；或反向 `LinearLayoutManager` + 顶部 footer。
+
+**Compose：** `rememberLazyListState()`；`firstVisibleItemIndex == 0` 时用 `pointerInput` + `detectVerticalDragGestures` 累计 `topDragOffset > 80` 触发 `LoadOlderHistory`。
+
+```444:448:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
+    LaunchedEffect(listState.firstVisibleItemIndex, topDragOffset, canLoadMoreHistory) {
+        if (listState.firstVisibleItemIndex == 0 && topDragOffset > 80f && canLoadMoreHistory) {
+            onLoadMoreHistory()
+            topDragOffset = 0f
+        }
+    }
+```
+
+```335:350:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
+    private fun loadOlderHistory() {
+        val userId = _uiState.value.activeChatUserId ?: return
+        val all = chatHistoryByUser[userId].orEmpty()
+        val loaded = loadedHistoryCountByUser[userId] ?: INITIAL_VISIBLE_HISTORY
+        if (loaded >= all.size || _uiState.value.loadingHistory) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(loadingHistory = true) }
+            delay(900)
+            loadedHistoryCountByUser[userId] = min(all.size, loaded + HISTORY_PAGE_SIZE)
+            refreshVisibleHistory(userId = userId, shouldScrollToLatest = false)
+            ...
+        }
+    }
+```
+
+全量历史在 `chatHistoryByUser`，UI 只显示 `visibleChatMessages` 尾部窗口（初始 12 条，每次 +8）——对应 ListView 只 bind 部分数据。
+
+---
+
+#### 6. 两种聊天气泡（itemType）
+
+**XML：** `getItemViewType` 返回 `TYPE_LEFT` / `TYPE_RIGHT`，`onCreateViewHolder` inflate 不同 layout。
+
+**Compose：** 同一 `itemsIndexed`，用 `message.sender == ChatSender.ME` 决定 `Arrangement.End/Start` 和气泡颜色。
+
+```485:527:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
+            val isMe = message.sender == ChatSender.ME
+            Row(
+                horizontalArrangement = if (isMe) Arrangement.End else Arrangement.Start,
+                ...
+            ) {
+                if (!isMe) { WeChatAvatar(...); ... }
+                Column(...) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (isMe) Color(0xFF95EC69) else Color.White)
+                            ...
+                    ) { Text(message.text) }
+                }
+                if (isMe) { ... WeChatAvatar(WeChatContact("me", ...)) }
+            }
+```
+
+发送消息：输入框 `mutableStateOf` 本地持有草稿，点发送发 `WeChatIntent.SendMessage`：
+
+```395:400:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
+                Button(onClick = {
+                    val msg = input.trim()
+                    if (msg.isNotBlank()) {
+                        input = ""
+                        processIntent(WeChatIntent.SendMessage(msg))
+                    }
+                }) { Text("发送") }
+```
+
+---
+
+#### 7. 头像放大进入用户详情
+
+与目标 4 相同机制，样式为 `AVATAR_ZOOM`（更小 initialScale，模拟头像放大）：
+
+```187:188:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
+            is WeChatIntent.OpenProfileFromAvatar -> openProfile(intent.userId, WeChatTransitionStyle.AVATAR_ZOOM)
+```
+
+通讯录点整行进入详情用 `NORMAL`（无缩放强调）：
+
+```188:188:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
+            is WeChatIntent.OpenProfileFromContact -> openProfile(intent.userId, WeChatTransitionStyle.NORMAL)
+```
+
+---
+
+#### 8. 详情页头像 ViewPager
+
+**XML：** `ViewPager2` + `FragmentStateAdapter`。
+
+**Compose：** 详情顶部 `HorizontalPager(pageCount = contact.avatarPalette.size)`，每页一个色块 + 居中名字（Demo 用调色板代替多张照片）。
+
+```572:590:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
+            HorizontalPager(
+                state = avatarPagerState,
+                modifier = Modifier.fillMaxWidth().aspectRatio(1f),
+            ) { page ->
+                Box(
+                    modifier = Modifier.fillMaxSize()
+                        .background(Color(contact.avatarPalette[page].toLong())),
+                    contentAlignment = Alignment.Center,
+                ) { Text(contact.name, ...) }
+            }
+```
+
+朋友圈整体在 **`LazyColumn` 里向下滚**（不是 NestedScrollView 包 WebView，而是 Compose 嵌套：外层 `LazyColumn` + 内层 `LazyVerticalGrid` 九宫格）。
+
+---
+
+#### 9. 朋友圈：九宫格 + ViewModel 驱动 UI 更新
+
+**XML：** `GridView` / `RecyclerView GridLayoutManager`；点赞后 `notifyItemChanged`；评论 `EditText` + 提交。
+
+**Compose：**
+
+- 九宫格：`LazyVerticalGrid(GridCells.Fixed(3))` + `BoxWithConstraints` 算 cell 高度（避免网格在 `LazyColumn` 里高度未知）。
+- 点赞 / 评论：Intent 进 VM，改 `momentsByUser` immutable map。
+
+```369:381:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
+    private fun toggleMomentLike(userId: String, momentId: String) {
+        val updated = _uiState.value.momentsByUser.toMutableMap()
+        val rows = updated[userId].orEmpty().map { moment ->
+            if (moment.id != momentId) moment
+            else if (moment.liked) moment.copy(liked = false, likeCount = ...)
+            else moment.copy(liked = true, likeCount = moment.likeCount + 1)
+        }
+        updated[userId] = rows
+        _uiState.update { it.copy(momentsByUser = updated) }
+    }
+```
+
+`MomentCard` 内 `moment.comments.forEach` 会自动随 state 重组，等价于 `ChangeNotifier` / `LiveData` 通知 View 刷新。
+
+---
+
+#### 10. 语音通话页：`Box` 对齐（ConstraintLayout）
+
+**XML：** `ConstraintLayout` 约束头像居中、按钮贴底左右。
+
+**Compose：** 单层 `Box(fillMaxSize)` + 子项 `Modifier.align`：
+
+```787:846:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
+    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF121212))) {
+        Box(modifier = Modifier.align(Alignment.TopCenter).padding(top = 24.dp), ...) { Text("返回") }
+        WeChatAvatar(modifier = Modifier.align(Alignment.Center).size(180.dp), ...)
+        Column(modifier = Modifier.align(Alignment.TopCenter).padding(top = 90.dp), ...) { /* 姓名 + 时长 */ }
+        Box(modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(...)) {
+            Button(modifier = Modifier.align(Alignment.CenterStart).width(120.dp), ...) { Text("静音") }
+            Button(modifier = Modifier.align(Alignment.CenterEnd).width(120.dp), ...) { Text("挂断") }
+        }
+    }
+```
+
+通话计时在 VM：`startCallTimer()` 每秒 `callDurationSeconds++`（≈ `Handler.postDelayed` 循环）。
+
+---
+
+#### 11. 页面栈复用（防循环创建 OOM）
+
+**XML：** `launchMode="singleTop"`、`FragmentTransaction` 带 tag 复用、或 Navigation `popUpTo` + `launchSingleTop`。
+
+**Compose Demo：** 内存栈 `pageStack`，`pushOrReuse` 若 `nextPage.key` 已存在则 **pop 到该页**，不重复 new：
+
+```295:309:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
+    private fun pushOrReuse(nextPage: WeChatPage, transitionStyle: WeChatTransitionStyle) {
+        val existingIndex = pageStack.indexOfFirst { it.key == nextPage.key }
+        if (existingIndex == pageStack.lastIndex) return
+        if (existingIndex >= 0) {
+            while (pageStack.size > existingIndex + 1) {
+                val removed = pageStack.removeAt(pageStack.lastIndex)
+                if (removed is WeChatPage.VoiceCall) stopCallTimer()
+            }
+            publishNavState(WeChatNavAction.POP, transitionStyle)
+        } else {
+            pageStack += nextPage
+            publishNavState(WeChatNavAction.PUSH, transitionStyle)
+        }
+    }
+```
+
+`WeChatPage` 的 `key`（如 `chat:u_lina`、`profile:u_lina`）≈ Activity/Fragment 的 canonical name。
+
+典型路径：消息 → 聊天 → 点头像 → 详情 → 发消息 → 聊天 → … 栈上同 userId 的 Chat/Profile 只保留一份实例。
+
+---
+
+#### 12. （补充）单向数据流 MVI
+
+| 概念 | 本 Demo |
+|------|---------|
+| Intent | `sealed class WeChatIntent`（用户操作） |
+| State | `data class WeChatUiState` + `StateFlow` |
+| Effect | `WeChatEffect.ShowToast`（一次性副作用） |
+
+```181:199:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
+    fun processIntent(intent: WeChatIntent) {
+        when (intent) {
+            is WeChatIntent.SelectTab -> _uiState.update { it.copy(activeTab = intent.tab) }
+            WeChatIntent.RefreshMessages -> refreshMessages()
+            is WeChatIntent.OpenChatFromMessage -> openChat(...)
+            ...
+            WeChatIntent.NavigateBack -> navigateBack()
+        }
+    }
+```
+
+UI **不**直接改 `pageStack`，只 `processIntent`——和 XML 里 Presenter 收事件再改 Model 一样。
+
+---
+
+#### 13. （补充）「回到最新消息」气泡
+
+**XML：** 监听 `RecyclerView` 是否滑到底部，显示 `FloatingActionButton` 或 Snackbar 样式条。
+
+**Compose：** `derivedStateOf` 读 `listState.layoutInfo`，最后可见 index `< total - 1` 时显示；点击 `animateScrollToItem(lastIndex)`。
+
+```321:428:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
+    val showBackToLatest by remember {
+        derivedStateOf {
+            val visibleInfo = listState.layoutInfo.visibleItemsInfo
+            ...
+            total > 0 && lastVisible < total - 1
+        }
+    }
+    AnimatedVisibility(visible = showBackToLatest, ...) {
+        Text("回到最新消息", modifier = Modifier.clickable { listState.animateScrollToItem(...) })
+    }
+```
+
+新消息应滚到底：`scrollToLatestToken` 在 VM 递增，`LaunchedEffect` 触发 `animateScrollToItem`。
+
+---
+
+#### 14. （补充）通讯录搜索
+
+**XML：** `EditText` + `TextWatcher` 过滤 Adapter 列表。
+
+**Compose：** `OutlinedTextField` → `UpdateContactQuery`；`WeChatUiState.filteredContacts` 计算属性过滤。
+
+```130:138:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
+    val filteredContacts: List<WeChatContact>
+        get() = if (contactQuery.isBlank()) contacts
+        else contacts.filter { it.name.contains(...) || it.subtitle.contains(...) }
+```
+
+---
+
+#### 15. （补充）`@Preview` 不跑真机也能看 UI
+
+`WeChatDemoScreen.kt` / `ContactMessageItem.kt` 底部多个 `@Preview`，传入假 `WeChatUiState`，Android Studio Compose Preview 即可对照 XML 的 Layout Editor。
+
+---
+
+#### 常用 Modifier 与 XML 对照速查
+
+| Compose | 近似 XML |
+|---------|----------|
+| `Modifier.fillMaxWidth()` | `layout_width="match_parent"` |
+| `Modifier.padding(12.dp)` | `android:padding="12dp"` |
+| `Modifier.weight(1f)`（在 Row/Column 内） | `layout_weight="1"` |
+| `Modifier.clickable { }` | `android:onClick` / `setOnClickListener` |
+| `Modifier.clip(RoundedCornerShape)` | `shape` / `ViewOutlineProvider` |
+| `Arrangement.SpaceEvenly` | `LinearLayout` 等分间距 |
+| `LazyColumn` + `items` | `RecyclerView` |
+| `AnimatedContent` / `AnimatedVisibility` | `TransitionManager` / 属性动画 |
+| `Box` + `align` | `ConstraintLayout` 约束 |
+| `remember` / `mutableStateOf` | 成员变量 + `invalidate` |
+| `collectAsState()` | 观察 `LiveData` |
+
+---
+
+#### 学习建议（从 XML 转 Compose）
+
+1. 先画 **状态树**：本 Demo 是 `WeChatPage`（全屏）× `WeChatTab`（Home 内分页），不要和 `AppRoute` 混在一层。
+2. 列表一律想 **「数据 + LazyColumn」**，不要找 `Adapter`；item 类型用 `when`/枚举分支，不是 `viewType` 整数。
+3. 动画优先挂在 **导航容器**（`AnimatedContent`）上，而不是每个 item。
+4. 业务逻辑放 **ViewModel + Intent**，Compose 函数保持纯 UI，方便 Preview 和 KMP 共享。
+5. 在 IDE 里打开 `WeChatDemoScreen.kt` 的 Preview 面板，对照本文各节代码逐块改参数观察效果。
+
+更细的 Compose-only 笔记可继续写在 [JetpackComposeUI.md](JetpackComposeUI.md)。
+
+
 
 ### Flutter实现
 
