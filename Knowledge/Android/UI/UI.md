@@ -348,12 +348,6 @@ private fun WeChatHomePage(
 }
 ```
 
-```xml
-
-```
-```kotlin
-
-```
 
 * 布局
 
@@ -496,51 +490,160 @@ Navigation
 
 
 
-#### 2. 自定义列表项：`ContactMessageItem` + `LazyColumn`
+#### 自定义列表
 
-**XML：** 继承 `RecyclerView.ViewHolder`，在 `item_contact_message.xml` 里摆头像、昵称、预览、时间、红点。
+**XML：** 聊天页 = `RecyclerView` + `Adapter`；每一行 = `item_chat_left.xml` / `item_chat_right.xml`（`getItemViewType`）；
+顶部 footer 提示「下拉加载更早」；`OnScrollListener` 判断是否在底部。
 
-**Compose：** 把一整行拆成可复用 `@Composable`，列表只负责 `items` 循环。
+**Compose：** `WeChatChatPage` + `ChatMessageList`；`LazyColumn` + `itemsIndexed`；`message.sender` 分支左右气泡；
+`LazyListState` + `pointerInput` 感知顶部下拉；`derivedStateOf` 控制「回到最新消息」。
 
-```32:94:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/components/ContactMessageItem.kt
-fun ContactMessageItem(
-    preview: WeChatMessagePreview,
+* RecyclerView → LazyColumn 对照
+
+```text
+RecyclerView                    → LazyColumn + rememberLazyListState()
+Adapter + ViewHolder            → itemsIndexed { } 内 @Composable 行 UI
+getItemViewType                 → message.sender == ChatSender.ME 分支
+顶部 footer / 下拉加载            → item { 提示文案 } + detectVerticalDragGestures
+OnScrollListener 是否在底部       → listState.layoutInfo + derivedStateOf
+notifyDataSetChanged            → _uiState.update { visibleChatMessages = ... }
+```
+
+
+##### 自定义列表项Item
+
+XML里用 ViewHolder 根据不同的 viewType 绑定不同的 viewBinding
+Compose中 直接使用 @Composable 组合函数 + itemsIndexed 
+
+自定义view
+```kotlin
+@Composable
+fun ChatMessageItem(
+    message: WeChatChatMessage,
     contact: WeChatContact?,
-    onClick: () -> Unit,
-    onAvatarClick: () -> Unit,
+    onAvatarClick: (String) -> Unit,
 ) {
+    val isMe = message.sender == ChatSender.ME
+
     Row(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(...),
-        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp),
+        horizontalArrangement = if (isMe) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.Top,
     ) {
-        WeChatAvatar(..., onClick = onAvatarClick)
-        Column(modifier = Modifier.weight(1f)) { /* 名称 + 预览 */ }
-        Column(horizontalAlignment = Alignment.End) { /* 时间 + 未读角标 */ }
+        // 对方发送，先显示头像
+        if (!isMe) {
+            WeChatAvatar(
+                modifier = Modifier.size(36.dp),
+                contact = contact,
+                paletteIndex = 0,
+                onClick = { onAvatarClick(contact?.id.orEmpty()) },
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+        }
+        // 消息体
+        Column(horizontalAlignment = if (isMe) Alignment.End else Alignment.Start) {
+            Text(
+                text = message.timeLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF8A8A8A),
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (isMe) Color(0xFF95EC69) else Color.White)
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+            ) {
+                Text(message.text, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+        // 我发送，后显示头像
+        if (isMe) {
+            Spacer(modifier = Modifier.width(8.dp))
+            WeChatAvatar(
+                modifier = Modifier.size(36.dp),
+                contact = meContactForChat,
+                paletteIndex = 0,
+                onClick = { onAvatarClick("me") },
+            )
+        }
     }
 }
 ```
 
-消息页挂载（≈ `RecyclerView.setAdapter`）：
+##### 自定义列表
 
-```220:238:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
-    PullToRefreshBox(isRefreshing = state.refreshingMessages, onRefresh = { ... }) {
-        LazyColumn {
-            items(state.messagePreviews, key = { it.contactId }) { preview ->
-                ContactMessageItem(
-                    preview = preview,
-                    contact = contact,
-                    onClick = { processIntent(WeChatIntent.OpenChatFromMessage(preview.contactId)) },
-                    onAvatarClick = { processIntent(WeChatIntent.OpenProfileFromAvatar(preview.contactId)) },
+在XML中使用的是RecyclerView
+Compose中使用的是LazyColumn
+
+```kotlin
+    // ==============================================
+    // 聊天消息列表 = LazyColumn（对应 XML RecyclerView）
+    // 带自动复用、滑动状态、手势监听
+    // ==============================================
+    LazyColumn(
+        state = listState,
+        modifier = modifier
+            .fillMaxWidth()
+            .background(Color(0xFFEFEFEF))
+            // 监听垂直下拉手势，实现“顶部下拉加载历史”
+            .pointerInput(canLoadMoreHistory) {
+                detectVerticalDragGestures { _, dragAmount ->
+                    // 条件：已经滑到顶部 + 向下拖拽 + 允许加载历史
+                    if (listState.firstVisibleItemIndex == 0 && dragAmount > 0 && canLoadMoreHistory) {
+                        topDragOffset += dragAmount
+                    } else {
+                        // 其他情况重置偏移，避免误触发
+                        topDragOffset = 0f
+                    }
+                }
+            },
+        // Item 之间的间距（对应 XML ItemDecoration）
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        // ==============================================
+        // 列表 Header（头部）
+        // 显示：下拉加载更早消息
+        // ==============================================
+        item {
+            Spacer(modifier = Modifier.height(8.dp))
+            if (canLoadMoreHistory) {
+                Text(
+                    text = "下拉加载更早消息",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color(0xFF808080),
                 )
-                Divider(...)
             }
         }
+        // ==============================================
+        // 消息列表主体（多条气泡 Item），相当于 XML Adapter + ViewHolder
+        // key：保证列表刷新稳定，避免闪烁、错乱
+        // ==============================================
+        itemsIndexed(
+            items = messages,
+            // 通过index + message.id 生成 view中item的唯一id
+            key = { index, message -> "${message.id}-$index" },
+        ) { _, message ->   // 每一项要显示的 UI
+            ChatMessageItem(
+                message = message,
+                contact = contact,
+                onAvatarClick = onAvatarClick,
+            )
+        }
+        // ==============================================
+        // 列表 Footer（底部）
+        // 仅作底部间距，让最后一条消息不贴底
+        // ==============================================
+        item { Spacer(modifier = Modifier.height(8.dp)) }
     }
 ```
 
-`LazyColumn` ≈ `RecyclerView`；`items(..., key = {})` ≈ stable id，利于复用与动画。
-
----
 
 #### 3. 下拉刷新（假刷新）
 
@@ -589,81 +692,7 @@ Toast 通过 `Channel` + `WeChatEffect`，在 `App.kt` 的 `LaunchedEffect(weCha
 
 ---
 
-#### 5. 聊天列表：顶部下拉加载历史
-
-**XML：** `RecyclerView` 滑到 `position == 0` 且继续下拉时触发加载；或反向 `LinearLayoutManager` + 顶部 footer。
-
-**Compose：** `rememberLazyListState()`；`firstVisibleItemIndex == 0` 时用 `pointerInput` + `detectVerticalDragGestures` 累计 `topDragOffset > 80` 触发 `LoadOlderHistory`。
-
-```444:448:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
-    LaunchedEffect(listState.firstVisibleItemIndex, topDragOffset, canLoadMoreHistory) {
-        if (listState.firstVisibleItemIndex == 0 && topDragOffset > 80f && canLoadMoreHistory) {
-            onLoadMoreHistory()
-            topDragOffset = 0f
-        }
-    }
-```
-
-```335:350:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
-    private fun loadOlderHistory() {
-        val userId = _uiState.value.activeChatUserId ?: return
-        val all = chatHistoryByUser[userId].orEmpty()
-        val loaded = loadedHistoryCountByUser[userId] ?: INITIAL_VISIBLE_HISTORY
-        if (loaded >= all.size || _uiState.value.loadingHistory) return
-        viewModelScope.launch {
-            _uiState.update { it.copy(loadingHistory = true) }
-            delay(900)
-            loadedHistoryCountByUser[userId] = min(all.size, loaded + HISTORY_PAGE_SIZE)
-            refreshVisibleHistory(userId = userId, shouldScrollToLatest = false)
-            ...
-        }
-    }
-```
-
-全量历史在 `chatHistoryByUser`，UI 只显示 `visibleChatMessages` 尾部窗口（初始 12 条，每次 +8）——对应 ListView 只 bind 部分数据。
-
----
-
-#### 6. 两种聊天气泡（itemType）
-
-**XML：** `getItemViewType` 返回 `TYPE_LEFT` / `TYPE_RIGHT`，`onCreateViewHolder` inflate 不同 layout。
-
-**Compose：** 同一 `itemsIndexed`，用 `message.sender == ChatSender.ME` 决定 `Arrangement.End/Start` 和气泡颜色。
-
-```485:527:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
-            val isMe = message.sender == ChatSender.ME
-            Row(
-                horizontalArrangement = if (isMe) Arrangement.End else Arrangement.Start,
-                ...
-            ) {
-                if (!isMe) { WeChatAvatar(...); ... }
-                Column(...) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(if (isMe) Color(0xFF95EC69) else Color.White)
-                            ...
-                    ) { Text(message.text) }
-                }
-                if (isMe) { ... WeChatAvatar(WeChatContact("me", ...)) }
-            }
-```
-
-发送消息：输入框 `mutableStateOf` 本地持有草稿，点发送发 `WeChatIntent.SendMessage`：
-
-```395:400:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
-                Button(onClick = {
-                    val msg = input.trim()
-                    if (msg.isNotBlank()) {
-                        input = ""
-                        processIntent(WeChatIntent.SendMessage(msg))
-                    }
-                }) { Text("发送") }
-```
-
----
-
-#### 7. 头像放大进入用户详情
+#### 5. 头像放大进入用户详情
 
 与目标 4 相同机制，样式为 `AVATAR_ZOOM`（更小 initialScale，模拟头像放大）：
 
@@ -679,7 +708,7 @@ Toast 通过 `Channel` + `WeChatEffect`，在 `App.kt` 的 `LaunchedEffect(weCha
 
 ---
 
-#### 8. 详情页头像 ViewPager
+#### 6. 详情页头像 ViewPager
 
 **XML：** `ViewPager2` + `FragmentStateAdapter`。
 
@@ -702,7 +731,7 @@ Toast 通过 `Channel` + `WeChatEffect`，在 `App.kt` 的 `LaunchedEffect(weCha
 
 ---
 
-#### 9. 朋友圈：九宫格 + ViewModel 驱动 UI 更新
+#### 7. 朋友圈：九宫格 + ViewModel 驱动 UI 更新
 
 **XML：** `GridView` / `RecyclerView GridLayoutManager`；点赞后 `notifyItemChanged`；评论 `EditText` + 提交。
 
@@ -728,7 +757,7 @@ Toast 通过 `Channel` + `WeChatEffect`，在 `App.kt` 的 `LaunchedEffect(weCha
 
 ---
 
-#### 10. 语音通话页：`Box` 对齐（ConstraintLayout）
+#### 8. 语音通话页：`Box` 对齐（ConstraintLayout）
 
 **XML：** `ConstraintLayout` 约束头像居中、按钮贴底左右。
 
@@ -750,7 +779,7 @@ Toast 通过 `Channel` + `WeChatEffect`，在 `App.kt` 的 `LaunchedEffect(weCha
 
 ---
 
-#### 11. 页面栈复用（防循环创建 OOM）
+#### 9. 页面栈复用（防循环创建 OOM）
 
 **XML：** `launchMode="singleTop"`、`FragmentTransaction` 带 tag 复用、或 Navigation `popUpTo` + `launchSingleTop`。
 
@@ -779,7 +808,7 @@ Toast 通过 `Channel` + `WeChatEffect`，在 `App.kt` 的 `LaunchedEffect(weCha
 
 ---
 
-#### 12. （补充）单向数据流 MVI
+#### 10. （补充）单向数据流 MVI
 
 | 概念 | 本 Demo |
 |------|---------|
@@ -803,30 +832,7 @@ UI **不**直接改 `pageStack`，只 `processIntent`——和 XML 里 Presenter
 
 ---
 
-#### 13. （补充）「回到最新消息」气泡
-
-**XML：** 监听 `RecyclerView` 是否滑到底部，显示 `FloatingActionButton` 或 Snackbar 样式条。
-
-**Compose：** `derivedStateOf` 读 `listState.layoutInfo`，最后可见 index `< total - 1` 时显示；点击 `animateScrollToItem(lastIndex)`。
-
-```321:428:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
-    val showBackToLatest by remember {
-        derivedStateOf {
-            val visibleInfo = listState.layoutInfo.visibleItemsInfo
-            ...
-            total > 0 && lastVisible < total - 1
-        }
-    }
-    AnimatedVisibility(visible = showBackToLatest, ...) {
-        Text("回到最新消息", modifier = Modifier.clickable { listState.animateScrollToItem(...) })
-    }
-```
-
-新消息应滚到底：`scrollToLatestToken` 在 VM 递增，`LaunchedEffect` 触发 `animateScrollToItem`。
-
----
-
-#### 14. （补充）通讯录搜索
+#### 11. （补充）通讯录搜索
 
 **XML：** `EditText` + `TextWatcher` 过滤 Adapter 列表。
 
@@ -840,7 +846,7 @@ UI **不**直接改 `pageStack`，只 `processIntent`——和 XML 里 Presenter
 
 ---
 
-#### 15. （补充）`@Preview` 不跑真机也能看 UI
+#### 12. （补充）`@Preview` 不跑真机也能看 UI
 
 `WeChatDemoScreen.kt` / `ContactMessageItem.kt` 底部多个 `@Preview`，传入假 `WeChatUiState`，Android Studio Compose Preview 即可对照 XML 的 Layout Editor。
 
