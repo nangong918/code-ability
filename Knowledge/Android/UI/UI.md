@@ -764,24 +764,38 @@ private fun weChatTransitionSpec(
 
 **Compose：** 详情顶部 `HorizontalPager(pageCount = contact.avatarPalette.size)`，每页一个色块 + 居中名字（Demo 用调色板代替多张照片）。
 
-```572:590:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
-            HorizontalPager(
-                state = avatarPagerState,
-                modifier = Modifier.fillMaxWidth().aspectRatio(1f),
-            ) { page ->
-                Box(
-                    modifier = Modifier.fillMaxSize()
-                        .background(Color(contact.avatarPalette[page].toLong())),
-                    contentAlignment = Alignment.Center,
-                ) { Text(contact.name, ...) }
-            }
+```kotlin
+// 横向滑动的 ViewPager（= XML ViewPager2）
+HorizontalPager(
+    state = avatarPagerState,          // 滑动状态、当前页码
+    modifier = Modifier
+        .fillMaxWidth()                 // 宽度铺满
+        .aspectRatio(1f),               // 宽高比 1:1 → 正方形（头像区域）
+) { page ->                             // page = 当前滑动到的索引
+
+    // 每一页的 UI（这里用颜色块+名字模拟头像）
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(contact.avatarPalette[page].toLong())),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = contact.name,
+            color = Color.White,
+            style = MaterialTheme.typography.headlineSmall,
+        )
+    }
+}
 ```
 
 朋友圈整体在 **`LazyColumn` 里向下滚**（不是 NestedScrollView 包 WebView，而是 Compose 嵌套：外层 `LazyColumn` + 内层 `LazyVerticalGrid` 九宫格）。
 
 ---
 
-#### 7. 朋友圈：九宫格 + ViewModel 驱动 UI 更新
+#### 朋友圈：九宫格 + ViewModel 驱动 UI 更新
+
+##### 网格布局
 
 **XML：** `GridView` / `RecyclerView GridLayoutManager`；点赞后 `notifyItemChanged`；评论 `EditText` + 提交。
 
@@ -790,22 +804,88 @@ private fun weChatTransitionSpec(
 - 九宫格：`LazyVerticalGrid(GridCells.Fixed(3))` + `BoxWithConstraints` 算 cell 高度（避免网格在 `LazyColumn` 里高度未知）。
 - 点赞 / 评论：Intent 进 VM，改 `momentsByUser` immutable map。
 
-```369:381:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
-    private fun toggleMomentLike(userId: String, momentId: String) {
-        val updated = _uiState.value.momentsByUser.toMutableMap()
-        val rows = updated[userId].orEmpty().map { moment ->
-            if (moment.id != momentId) moment
-            else if (moment.liked) moment.copy(liked = false, likeCount = ...)
-            else moment.copy(liked = true, likeCount = moment.likeCount + 1)
+```kotlin
+// BoxWithConstraints = 可以获取父容器宽高的布局（用来计算九宫格大小）
+BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+    // 1. 计算每一个格子的大小：屏幕宽度 - 间距 ÷ 3（九宫格每一张图的尺寸）
+    val cellSize = (maxWidth - 12.dp) / 3
+
+    // 2. 计算需要多少行：(图片总数 + 2) ÷ 3 = 向上取整（1-3图1行，4-6图2行，7-9图3行）
+    val rows = (photos.size + 2) / 3
+
+    // 3. 计算整个九宫格总高度：行高 + 行间距
+    val gridHeight = (cellSize * rows) + (6.dp * (rows - 1).coerceAtLeast(0))
+
+    // ==============================
+    // LazyVerticalGrid = 网格列表（对应 XML：GridView / GridLayoutManager）
+    // 固定3列 = 九宫格
+    // ==============================
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(3), // 固定3列（核心：九宫格）
+        userScrollEnabled = false,    // 禁止列表滚动（朋友圈只展示，不单独滚动）
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(gridHeight),      // 固定高度，根据图片数量计算
+        horizontalArrangement = Arrangement.spacedBy(6.dp), // 图片水平间距
+        verticalArrangement = Arrangement.spacedBy(6.dp),   // 图片垂直间距
+    ) {
+        // 遍历图片列表，渲染每一项
+        items(photos, key = { it.label }) { photo ->
+            // 图片加载（对应 XML：ImageView + Glide）
+            AsyncImage(
+                model = Res.getUri(photo.resourcePath), // 图片地址
+                contentDescription = photo.label,
+                contentScale = ContentScale.Crop,        // 图片居中裁剪（仿朋友圈）
+                modifier = Modifier
+                    .size(cellSize)          // 每个格子都是正方形
+                    .clip(RoundedCornerShape(8.dp)) // 圆角
+                    .clickable { onPhotoClick(photo) }, // 点击查看大图
+            )
         }
-        updated[userId] = rows
-        _uiState.update { it.copy(momentsByUser = updated) }
     }
+}
 ```
 
-`MomentCard` 内 `moment.comments.forEach` 会自动随 state 重组，等价于 `ChangeNotifier` / `LiveData` 通知 View 刷新。
 
----
+##### ViewModel数据联动
+
+**XML：**
+XML + LiveData = 必须.observe()
+```kotlin
+// 必须观察
+viewModel.liveData.observe(this) { data ->
+    // 手动更新 UI
+    textView.setText(data.text)
+    commentAdapter.setList(data.comments)
+}
+```
+
+**Compose：**
+```kotlin
+// 不用观察
+// 不用手动更新
+// 不用 findView
+// 不用 adapter.notify
+
+// 只要参数变了 → UI 自动刷新
+fun MomentCard(moment: WeChatMoment) {
+    // 直接用
+    Text(moment.text)
+    moment.comments.forEach { comment ->
+        Text(
+            text = "${comment.authorName}: ${comment.content}",
+            style = MaterialTheme.typography.bodySmall,
+            color = if (comment.mine) Color(0xFF1AAD19) else MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+```
+
+外部 state（moment）变化 → UI 自动刷新
+点赞、评论、收到评论 → 全部自动更新
+Compose在 UI 内写响应式函数，不需要 LiveData 等价于 `ChangeNotifier` / `LiveData` 通知 View 刷新。
+
+
 
 #### 8. 语音通话页：`Box` 对齐（ConstraintLayout）
 
