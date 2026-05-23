@@ -645,68 +645,118 @@ Compose中使用的是LazyColumn
 ```
 
 
-#### 3. 下拉刷新（假刷新）
+#### 下拉刷新
 
 **XML：** 包一层 `SwipeRefreshLayout`，`setOnRefreshListener` 里请求接口。
 
 **Compose：** Material3 `PullToRefreshBox`，刷新状态来自 `state.refreshingMessages`。
 
-ViewModel 侧（2 秒延迟 + Toast，无真实网络）：
-
-```220:227:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
-    private fun refreshMessages() {
-        if (_uiState.value.refreshingMessages) return
-        viewModelScope.launch {
-            _uiState.update { it.copy(refreshingMessages = true) }
-            delay(2000)
-            _uiState.update { it.copy(refreshingMessages = false) }
-            emitEffect(WeChatEffect.ShowToast("刷新成功"))
+```kotlin
+// 下拉刷新
+PullToRefreshBox(
+    isRefreshing = state.refreshingMessages,
+    onRefresh = { processIntent(WeChatIntent.RefreshMessages) },
+    modifier = Modifier.fillMaxSize(),
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        items(state.messagePreviews, key = { it.contactId }) { preview ->
+            val contact = state.contacts.firstOrNull { it.id == preview.contactId }
+            ContactMessageItem(
+                preview = preview,
+                contact = contact,
+                onClick = { processIntent(WeChatIntent.OpenChatFromMessage(preview.contactId)) },
+                onAvatarClick = { processIntent(WeChatIntent.OpenProfileFromAvatar(preview.contactId)) },
+            )
+            Divider(color = Color(0xFFEDEDED))
         }
     }
+}
 ```
 
-Toast 通过 `Channel` + `WeChatEffect`，在 `App.kt` 的 `LaunchedEffect(weChatDemoVm)` 里接到全局 `toastMessage`——等价于 XML 里 `Activity.runOnUiThread { Toast }`。
+#### 消息项缩放进入聊天页
 
----
+**Compose：** `AnimatedContent` 的 `transitionSpec` 用 `scaleIn` / `scaleOut` + `spring`。
 
-#### 4. 消息项缩放进入聊天页
-
-**XML：** `ActivityOptions.makeScaleUpAnimation` 或共享元素 Transition。
-
-**Compose：** 打开聊天时 VM 设 `WeChatTransitionStyle.MESSAGE_ZOOM` + `NavAction.PUSH`；`AnimatedContent` 的 `transitionSpec` 用 `scaleIn` / `scaleOut` + `spring`。
-
-```186:187:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
-            is WeChatIntent.OpenChatFromMessage -> openChat(intent.userId, WeChatTransitionStyle.MESSAGE_ZOOM)
+```kotlin
+// ==============================
+// AnimatedContent = 页面切换动画载体
+// 作用：根据 targetState 切换页面，并自动播放动画
+// ==============================
+AnimatedContent(
+    targetState = state.currentPage,       // 目标页面（切换它就会播放动画）
+    transitionSpec = {                     // 动画规格（上面定义的缩放/淡入淡出）
+        weChatTransitionSpec(state.navAction, state.transitionStyle)
+    },
+    label = "wechat-root-nav",             // 动画标签（调试用）
+) { page ->
+}
 ```
 
-```851:866:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
+`transitionSpec` 的参数选用
+
+```kotlin
+/**
+ * 页面切换动画配置（核心：自定义进/出栈动画）
+ * 对应 XML：overridePendingTransition 跳转动画
+ *
+ * @param action 页面动作：PUSH 进栈 / POP 出栈（返回）
+ * @param style 动画类型：消息放大 / 头像放大 / 普通淡入淡出
+ */
+@OptIn(ExperimentalAnimationApi::class)
+private fun weChatTransitionSpec(
+    action: WeChatNavAction,
+    style: WeChatTransitionStyle,
+) = when (style) {
+    // ==============================
+    // 1. 消息列表 → 聊天页面：缩放动画（中心放大效果）
+    // ==============================
     WeChatTransitionStyle.MESSAGE_ZOOM -> {
         if (action == WeChatNavAction.PUSH) {
-            (fadeIn(...) + scaleIn(initialScale = 0.85f, ...)) togetherWith
-                (fadeOut(...) + scaleOut(targetScale = 1.03f, ...))
-        } else { /* POP 反向缩放 */ }
+            // 【进栈】新页面从小放大（0.85 → 1）+ 淡入
+            // 旧页面稍微放大（1→1.03）+ 淡出
+            (fadeIn(animationSpec = spring(stiffness = Spring.StiffnessLow)) +
+                    scaleIn(initialScale = 0.85f, animationSpec = spring(stiffness = Spring.StiffnessMediumLow))) togetherWith
+                    (fadeOut(animationSpec = spring(stiffness = Spring.StiffnessMedium)) +
+                            scaleOut(targetScale = 1.03f, animationSpec = spring(stiffness = Spring.StiffnessLow)))
+        } else {
+            // 【出栈】返回：页面从大缩小回去 + 淡入
+            // 前一个页面恢复原状
+            (fadeIn(animationSpec = spring(stiffness = Spring.StiffnessLow)) +
+                    scaleIn(initialScale = 1.04f, animationSpec = spring(stiffness = Spring.StiffnessLow))) togetherWith
+                    (fadeOut(animationSpec = spring(stiffness = Spring.StiffnessMedium)) +
+                            scaleOut(targetScale = 0.86f, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)))
+        }
     }
+
+    // ==============================
+    // 2. 头像 → 用户详情页：头像放大动画
+    // ==============================
+    WeChatTransitionStyle.AVATAR_ZOOM -> {
+        if (action == WeChatNavAction.PUSH) {
+            // 新页面从头像大小(0.7)放大进入
+            // 旧页面轻微放大退出
+            (fadeIn() + scaleIn(initialScale = 0.7f)) togetherWith (fadeOut() + scaleOut(targetScale = 1.06f))
+        } else {
+            // 返回时缩小回到头像位置
+            (fadeIn() + scaleIn(initialScale = 1.05f)) togetherWith (fadeOut() + scaleOut(targetScale = 0.75f))
+        }
+    }
+    // ==============================
+    // 3. 普通页面：淡入淡出动画
+    // ==============================
+    WeChatTransitionStyle.NORMAL -> {
+        if (action == WeChatNavAction.PUSH) {
+            fadeIn() togetherWith fadeOut()
+        } else {
+            fadeIn() togetherWith fadeOut()
+        }
+    }
+}
 ```
 
-返回时 `navigateBack()` 对 `WeChatPage.Chat` 同样用 `MESSAGE_ZOOM` 的 POP 分支。
 
----
-
-#### 5. 头像放大进入用户详情
-
-与目标 4 相同机制，样式为 `AVATAR_ZOOM`（更小 initialScale，模拟头像放大）：
-
-```187:188:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
-            is WeChatIntent.OpenProfileFromAvatar -> openProfile(intent.userId, WeChatTransitionStyle.AVATAR_ZOOM)
-```
-
-通讯录点整行进入详情用 `NORMAL`（无缩放强调）：
-
-```188:188:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
-            is WeChatIntent.OpenProfileFromContact -> openProfile(intent.userId, WeChatTransitionStyle.NORMAL)
-```
-
----
 
 #### 6. 详情页头像 ViewPager
 
@@ -806,77 +856,9 @@ Toast 通过 `Channel` + `WeChatEffect`，在 `App.kt` 的 `LaunchedEffect(weCha
 
 典型路径：消息 → 聊天 → 点头像 → 详情 → 发消息 → 聊天 → … 栈上同 userId 的 Chat/Profile 只保留一份实例。
 
----
 
-#### 10. （补充）单向数据流 MVI
 
-| 概念 | 本 Demo |
-|------|---------|
-| Intent | `sealed class WeChatIntent`（用户操作） |
-| State | `data class WeChatUiState` + `StateFlow` |
-| Effect | `WeChatEffect.ShowToast`（一次性副作用） |
 
-```181:199:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
-    fun processIntent(intent: WeChatIntent) {
-        when (intent) {
-            is WeChatIntent.SelectTab -> _uiState.update { it.copy(activeTab = intent.tab) }
-            WeChatIntent.RefreshMessages -> refreshMessages()
-            is WeChatIntent.OpenChatFromMessage -> openChat(...)
-            ...
-            WeChatIntent.NavigateBack -> navigateBack()
-        }
-    }
-```
-
-UI **不**直接改 `pageStack`，只 `processIntent`——和 XML 里 Presenter 收事件再改 Model 一样。
-
----
-
-#### 11. （补充）通讯录搜索
-
-**XML：** `EditText` + `TextWatcher` 过滤 Adapter 列表。
-
-**Compose：** `OutlinedTextField` → `UpdateContactQuery`；`WeChatUiState.filteredContacts` 计算属性过滤。
-
-```130:138:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
-    val filteredContacts: List<WeChatContact>
-        get() = if (contactQuery.isBlank()) contacts
-        else contacts.filter { it.name.contains(...) || it.subtitle.contains(...) }
-```
-
----
-
-#### 12. （补充）`@Preview` 不跑真机也能看 UI
-
-`WeChatDemoScreen.kt` / `ContactMessageItem.kt` 底部多个 `@Preview`，传入假 `WeChatUiState`，Android Studio Compose Preview 即可对照 XML 的 Layout Editor。
-
----
-
-#### 常用 Modifier 与 XML 对照速查
-
-| Compose | 近似 XML |
-|---------|----------|
-| `Modifier.fillMaxWidth()` | `layout_width="match_parent"` |
-| `Modifier.padding(12.dp)` | `android:padding="12dp"` |
-| `Modifier.weight(1f)`（在 Row/Column 内） | `layout_weight="1"` |
-| `Modifier.clickable { }` | `android:onClick` / `setOnClickListener` |
-| `Modifier.clip(RoundedCornerShape)` | `shape` / `ViewOutlineProvider` |
-| `Arrangement.SpaceEvenly` | `LinearLayout` 等分间距 |
-| `LazyColumn` + `items` | `RecyclerView` |
-| `AnimatedContent` / `AnimatedVisibility` | `TransitionManager` / 属性动画 |
-| `Box` + `align` | `ConstraintLayout` 约束 |
-| `remember` / `mutableStateOf` | 成员变量 + `invalidate` |
-| `collectAsState()` | 观察 `LiveData` |
-
----
-
-#### 学习建议（从 XML 转 Compose）
-
-1. 先画 **状态树**：本 Demo 是 `WeChatPage`（全屏）× `WeChatTab`（Home 内分页），不要和 `AppRoute` 混在一层。
-2. 列表一律想 **「数据 + LazyColumn」**，不要找 `Adapter`；item 类型用 `when`/枚举分支，不是 `viewType` 整数。
-3. 动画优先挂在 **导航容器**（`AnimatedContent`）上，而不是每个 item。
-4. 业务逻辑放 **ViewModel + Intent**，Compose 函数保持纯 UI，方便 Preview 和 KMP 共享。
-5. 在 IDE 里打开 `WeChatDemoScreen.kt` 的 Preview 面板，对照本文各节代码逐块改参数观察效果。
 
 更细的 Compose-only 笔记可继续写在 [JetpackComposeUI.md](JetpackComposeUI.md)。
 
