@@ -849,8 +849,9 @@ BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
 
 ##### ViewModel数据联动
 
-**XML：**
-XML + LiveData = 必须.observe()
+**基础原理：Compose 自动刷新 vs XML LiveData**
+XML 传统模式（必须手动订阅）
+XML + LiveData = 必须通过 `.observe()` 手动监听并更新 UI
 ```kotlin
 // 必须观察
 viewModel.liveData.observe(this) { data ->
@@ -860,7 +861,10 @@ viewModel.liveData.observe(this) { data ->
 }
 ```
 
-**Compose：**
+**Compose 原生模式（参数驱动自动刷新）**
+
+Compose 是参数驱动响应式：上层传入的状态参数变化，UI 自动重组刷新，无需手动监听、findViewById、Adapter 通知。
+
 ```kotlin
 // 不用观察
 // 不用手动更新
@@ -868,23 +872,38 @@ viewModel.liveData.observe(this) { data ->
 // 不用 adapter.notify
 
 // 只要参数变了 → UI 自动刷新
+// 仅接收状态参数，参数变化 → UI 自动刷新
 fun MomentCard(moment: WeChatMoment) {
-    // 直接用
     Text(moment.text)
     moment.comments.forEach { comment ->
-        Text(
-            text = "${comment.authorName}: ${comment.content}",
-            style = MaterialTheme.typography.bodySmall,
-            color = if (comment.mine) Color(0xFF1AAD19) else MaterialTheme.colorScheme.onSurface,
-        )
+        Text(text = "${comment.authorName}: ${comment.content}")
     }
 }
 ```
 
-外部 state（moment）变化 → UI 自动刷新
-点赞、评论、收到评论 → 全部自动更新
-Compose在 UI 内写响应式函数，不需要 LiveData 等价于 `ChangeNotifier` / `LiveData` 通知 View 刷新。
+外部业务状态（点赞、新增评论、消息更新）变化，UI 自动同步更新
+Compose 内置响应式能力，原生替代 `ChangeNotifier` / `LiveData` 的通知刷新逻辑
 
+
+**状态分层：ViewModel 业务状态 vs UI 局部状态**
+
+* Screen 级页面：必须使用 ViewModel + StateFlow（KMP 标准）
+
+状态必须放在 ViewModel，不能放在 remember：避免业务逻辑与 UI 耦合，难测试、难复用、生命周期不稳定
+StateFlow 是 KMP 最优方案：纯 Kotlin 实现，无平台依赖，Android /iOS 全平台兼容，替代 LiveData
+
+MVI标准实现
+```kotlin
+// ViewModel 层（commonMain 跨平台）
+private val _uiState = MutableStateFlow(LoginState())
+val uiState: StateFlow<LoginState> = _uiState.asStateFlow()
+
+// UI 层订阅
+val loginState by loginVm.uiState.collectAsState()
+ComposeLoginScreen(state = loginState, processIntent = { loginVm.processIntent(it) })
+```
+
+* 自定义组件（Component）：仅用 remember { mutableStateOf } 存局部 UI 状态
 
 
 #### 8. 语音通话页：`Box` 对齐（ConstraintLayout）
