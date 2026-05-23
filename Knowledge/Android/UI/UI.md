@@ -758,7 +758,7 @@ private fun weChatTransitionSpec(
 
 
 
-#### 6. 详情页头像 ViewPager
+#### 详情页头像 ViewPager
 
 **XML：** `ViewPager2` + `FragmentStateAdapter`。
 
@@ -906,27 +906,269 @@ ComposeLoginScreen(state = loginState, processIntent = { loginVm.processIntent(i
 * 自定义组件（Component）：仅用 remember { mutableStateOf } 存局部 UI 状态
 
 
-#### 8. 语音通话页：`Box` 对齐（ConstraintLayout）
+#### Jetpack Compose 约束布局 ConstraintLayout
 
-**XML：** `ConstraintLayout` 约束头像居中、按钮贴底左右。
 
-**Compose：** 单层 `Box(fillMaxSize)` + 子项 `Modifier.align`：
+##### 核心 API
 
-```787:846:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/ui/view/wechat/WeChatDemoScreen.kt
-    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF121212))) {
-        Box(modifier = Modifier.align(Alignment.TopCenter).padding(top = 24.dp), ...) { Text("返回") }
-        WeChatAvatar(modifier = Modifier.align(Alignment.Center).size(180.dp), ...)
-        Column(modifier = Modifier.align(Alignment.TopCenter).padding(top = 90.dp), ...) { /* 姓名 + 时长 */ }
-        Box(modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(...)) {
-            Button(modifier = Modifier.align(Alignment.CenterStart).width(120.dp), ...) { Text("静音") }
-            Button(modifier = Modifier.align(Alignment.CenterEnd).width(120.dp), ...) { Text("挂断") }
-        }
-    }
+- createRefs()：创建多个引用 ID（对应 XML 组件 id）
+- constrainAs(xxxRef)：给组件绑定引用
+- top / bottom / start / end：上下左右约束
+- linkTo：建立与父布局 / 其他组件的相对关系
+- margin：边距
+- Dimension.value：固定宽高
+- Dimension.fillToConstraints：填充约束范围内的空间
+
+**1.组件引用ID**
+
+作用：定义唯一标识，用于组件之间互相约束依赖
+
+Compose：`createRefs()` 批量创建组件引用
+
+```kotlin
+val (backRef, avatarRef, nameRef) = createRefs()
 ```
 
-通话计时在 VM：`startCallTimer()` 每秒 `callDurationSeconds++`（≈ `Handler.postDelayed` 循环）。
+**XML**：通过 `android:id` 定义控件唯一ID
 
----
+```xml
+<ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+                  xmlns:app="http://schemas.android.com/apk/res-auto">
+    <!-- id -->
+    <ImageView
+            android:id="@+id/back"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintStart_toStartOf="parent"/>
+</ConstraintLayout>
+```
+
+**2.绑定组件约束**
+
+作用：将UI组件与创建的引用绑定，配置约束规则
+Compose：constrainAs(xxxRef) 绑定对应引用，内部编写约束逻辑
+```kotlin
+Modifier.constrainAs(backRef) { }
+```
+
+
+**3.约束方向标识**
+
+作用：指定上下左右四个约束方向
+
+Compose：原生方向关键字
+
+- `top` / `bottom` / `start` / `end`
+
+XML：对应约束属性前缀
+
+- `layout_constraintTop_to`
+
+- `layout_constraintBottom_to`
+
+- `layout_constraintStart_to`
+
+- `layout_constraintEnd_to`
+
+
+**4.建立相对约束关系**
+
+作用：让当前组件 关联父布局/其他组件，实现相对定位
+
+Compose：`linkTo()` 绑定约束目标
+
+```kotlin
+// 关联父布局顶部
+top.linkTo(parent.top)
+// 关联其他组件底部
+top.linkTo(nameRef.bottom)
+```
+
+**XML**：通过属性指定约束目标
+
+```xml
+<ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+                  xmlns:app="http://schemas.android.com/apk/res-auto">
+    <!-- 关联父布局顶部 -->
+    <!-- 关联其他组件底部 -->
+    <ImageView
+            android:id="@+id/back"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/name"/>
+</ConstraintLayout>
+
+```
+
+
+**5. 约束边距 margin**
+
+作用：约束定位时的外边距，仅对约束方向生效
+Compose：`linkTo`方法传参设置 margin
+
+```kotlin
+top.linkTo(parent.top, margin = 24.dp)
+```
+
+**XML**：独立 margin 属性
+
+```xml
+<ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+                  xmlns:app="http://schemas.android.com/apk/res-auto">
+    <!-- 距离顶部 -->
+    <ImageView
+            android:id="@+id/back"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"/>
+</ConstraintLayout>
+```
+
+
+**固定宽高尺寸**
+
+作用：给约束布局内组件设置固定宽高
+
+Compose：`Dimension.value()`
+
+```kotlin
+width = Dimension.value(180.dp)
+```
+
+XML：固定 dp 尺寸
+
+```text
+android:layout_width="180dp"
+```
+
+** 7.约束内填充尺寸**
+
+作用：在左右/上下约束范围内自动填满剩余空间（最常用）
+
+Compose：`Dimension.fillToConstraints`
+
+```kotlin
+width = Dimension.fillToConstraints
+```
+
+XML：经典 `0dp` 填充写法
+
+```text
+android:layout_width="0dp"
+app:layout_constraintStart_toStartOf="parent"
+app:layout_constraintEnd_toEndOf="parent"
+```
+
+##### Compose 代码实现
+```kotlin
+@Composable
+internal actual fun WeChatVoiceCallLayoutPlatform(
+    contact: WeChatContact?,
+    displayName: String,
+    duration: String,
+    callMuted: Boolean,
+    onBack: () -> Unit,
+    onToggleMute: () -> Unit,
+    onEndCall: () -> Unit,
+) {
+    // 约束布局根容器
+    ConstraintLayout(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF121212)),
+    ) {
+        // 定义所有组件的引用（相当于 XML 里的 id）
+        val (backRef, avatarRef, nameRef, durationRef, muteRef, hangupRef) = createRefs()
+
+        // 顶部返回按钮
+        Box(
+            modifier = Modifier
+                .constrainAs(backRef) {
+                    top.linkTo(parent.top, margin = 24.dp)
+                    start.linkTo(parent.start)
+                    end.linkTo(parent.end)
+                    width = Dimension.value(48.dp)
+                    height = Dimension.value(48.dp)
+                }
+                .clip(CircleShape)
+                .clickable(onClick = onBack)
+                .background(Color(0x33FFFFFF)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("返回", color = Color.White)
+        }
+
+        // 中间大头像（完全居中）
+        WeChatAvatar(
+            modifier = Modifier
+                .constrainAs(avatarRef) {
+                    top.linkTo(parent.top)
+                    bottom.linkTo(parent.bottom)
+                    start.linkTo(parent.start)
+                    end.linkTo(parent.end)
+                    width = Dimension.value(180.dp)
+                    height = Dimension.value(180.dp)
+                },
+            contact = contact,
+            paletteIndex = 2,
+        )
+
+        // 顶部居中用户名
+        Text(
+            text = displayName,
+            color = Color.White,
+            style = MaterialTheme.typography.headlineSmall,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.constrainAs(nameRef) {
+                top.linkTo(parent.top, margin = 90.dp)
+                start.linkTo(parent.start)
+                end.linkTo(parent.end)
+                width = Dimension.fillToConstraints
+            },
+        )
+
+        // 通话时长（在名字下方居中）
+        Text(
+            text = duration,
+            color = Color(0xFFDADADA),
+            textAlign = TextAlign.Center,
+            modifier = Modifier.constrainAs(durationRef) {
+                top.linkTo(nameRef.bottom, margin = 8.dp)
+                start.linkTo(parent.start)
+                end.linkTo(parent.end)
+                width = Dimension.fillToConstraints
+            },
+        )
+
+        // 底部左侧：静音按钮
+        Button(
+            onClick = onToggleMute,
+            modifier = Modifier.constrainAs(muteRef) {
+                bottom.linkTo(parent.bottom, margin = 34.dp)
+                start.linkTo(parent.start, margin = 24.dp)
+                width = Dimension.value(120.dp)
+            },
+        ) {
+            Text(if (callMuted) "取消静音" else "静音")
+        }
+
+        // 底部右侧：挂断按钮
+        Button(
+            onClick = onEndCall,
+            modifier = Modifier.constrainAs(hangupRef) {
+                bottom.linkTo(parent.bottom, margin = 34.dp)
+                end.linkTo(parent.end, margin = 24.dp)
+                width = Dimension.value(120.dp)
+            },
+        ) {
+            Text("挂断")
+        }
+    }
+}
+```
+
 
 #### 9. 页面栈复用（防循环创建 OOM）
 
@@ -934,7 +1176,7 @@ ComposeLoginScreen(state = loginState, processIntent = { loginVm.processIntent(i
 
 **Compose Demo：** 内存栈 `pageStack`，`pushOrReuse` 若 `nextPage.key` 已存在则 **pop 到该页**，不重复 new：
 
-```295:309:magic-vector/demo/kmp/shared/src/commonMain/kotlin/com/vectordemo/viewModel/wechat/WeChatDemoVm.kt
+```kotlin
     private fun pushOrReuse(nextPage: WeChatPage, transitionStyle: WeChatTransitionStyle) {
         val existingIndex = pageStack.indexOfFirst { it.key == nextPage.key }
         if (existingIndex == pageStack.lastIndex) return
