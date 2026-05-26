@@ -1229,9 +1229,111 @@ Demo 源码：`demo/flutter/flutternew/lib/`（目录分级与 KMP `ui/view/wech
 
 #### 页面管理
 
+
+* MaterialApp
+
+MaterialApp 是 Flutter 应用的**根入口 Widget**，相当于：
+- Android：MainApplication + 根 MainActivity
+- Compose：整个 App 的根容器
+- iOS：UIApplication + UIWindow
+
+它负责：
+- 应用主题（Theme）
+- 国际化（多语言）
+- 路由/页面跳转管理（最核心）
+- 全局配置（标题、Debug 条、主题）
+
+* 根组件 MyApp
+
+```dart
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(...);
+  }
+}
+```
+
+`MyApp` 是整个 App 的起点
+`StatelessWidget` 无状态，只负责配置全局环境
+`BuildContext` 是 Widget 树中的当前上下文
+
 ##### 路由和栈管理
 
-与 KMP 相同：外层 App 用 `MaterialApp.routes`（`config/app_route.dart`）进入 Demo；**WeChat 内层**不用 `go_router` / `Navigator 2.0` 管理子页，而在 `WeChatDemoVm` 内维护 `_pageStack`（对应 Compose 内存栈，不是 `NavHost`）。
+**MyApp中配置**
+
+在 `MyApp` 中，`MaterialApp.routes` 配置路由表，`MaterialApp.home` 指定默认页，`MaterialApp.initialRoute` 制定启动页面。
+
+```dart
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      // 核心：使用routes映射表（替代onGenerateRoute）
+      routes: appRoutes,
+      // 初始路由：先走启动页鉴权，再决定去主页面或登录页
+      initialRoute: AppRoutes.start,
+      // 可选：兜底处理未知路由（如果需要）
+      onUnknownRoute: unknownRoute,
+    );
+  }
+```
+
+**路由表**
+
+appRoutes 路由表 把「字符串路由名称」 → 映射到「具体页面 Widget」
+相当于 AndroidManifest.xml 里注册所有 Activity
+
+```dart
+final Map<String, WidgetBuilder> appRoutes = {
+  AppRoutes.start: (BuildContext context) {
+    return const StartPage();
+  },
+  AppRoutes.login: (BuildContext context) {
+    return const LoginPage();
+  },
+};
+```
+
+* WidgetBuilder
+
+```dart
+typedef WidgetBuilder = Widget Function(BuildContext context);
+```
+
+WidgetBuilder = 一个接收 context，返回 Widget 的函数
+
+* 为什么路由要用 WidgetBuilder，而不是直接写 Widget？
+
+原因 1：路由是 “懒加载” 的
+- 不是启动 App 就把所有页面都创建好
+- 只有跳转到这个页面时，才执行这个函数，才创建页面
+- 节省性能、节省内存（和 Android 只在启动时创建 Activity 一样）
+
+原因 2：需要传入 BuildContext
+- 页面需要 context 才能：
+  - 跳转下一个页面
+  - 弹出页面
+  - 获取主题
+  - 获取语言
+  - 获取上层状态
+
+* 页面跳转
+
+```dart
+  // 跳转并清空栈 
+  Navigator.pushNamedAndRemoveUntil(
+    context,
+    AppRoutes.login,
+    (route) => false,
+  );
+  // 跳转
+  Navigator.pushNamed(context, item.routeName!);
+```
+
+与 KMP 相同：外层 App 用 `MaterialApp.routes`（`config/app_route.dart`）进入 Demo；
+**WeChat 内层**不用 `go_router` / `Navigator 2.0` 管理子页，而在 `WeChatDemoVm` 内维护 `_pageStack`（对应 Compose 内存栈，不是 `NavHost`）。
 
 ```dart
 // config/app_route.dart
@@ -1254,16 +1356,6 @@ return WeChatAnimatedContent(
   child: _buildPage(context), // Home / Chat / Profile / VoiceCall
 );
 ```
-
-##### Activity
-
-外层 `MainPage` 等仍用命名路由；WeChat Demo 是其中一个路由目标，进入后完全由 `WeChatUiState.currentPage` 驱动 UI（无 Intent 传参）。
-
-##### Fragment
-
-**Fragment → StatelessWidget / StatefulWidget**
-
-子页是独立 Widget 树：`_WeChatHomePage`、`_WeChatChatPage`、`_WeChatProfilePage`、`WeChatVoiceCallLayout`，由 `switch` on `WeChatPage` 类型构建（密封类 `WeChatPageChat(userId)` 等同 Fragment `arguments`）。
 
 #### 底部 Tab + 横向分页
 
