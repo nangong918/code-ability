@@ -70,20 +70,15 @@
 
 | # | 目标 | XML / 传统 Android 对应 | Compose / KMP 实现要点 |
 |---|------|------------------------|------------------------|
-| 1 | 底部 Tab + 横向分页 | `BottomNavigation` + `ViewPager2` | `Scaffold` + `HorizontalPager` + `rememberPagerState` |
-| 2 | 自定义列表项 | 自定义 `View` + `RecyclerView.Adapter` | 独立 `@Composable`（`ContactMessageItem`）+ `LazyColumn` |
-| 3 | 下拉刷新（假数据） | `SwipeRefreshLayout` | `PullToRefreshBox` + ViewModel `delay` + Toast |
-| 4 | 消息项缩放进/chat 页 | `Activity` 转场 / `sharedElement` | 根导航 `AnimatedContent` + `WeChatTransitionStyle.MESSAGE_ZOOM` |
-| 5 | 聊天顶部的「加载更早消息」 | `RecyclerView` 顶部 + 手势 / `OnScrollListener` | `LazyListState.firstVisibleItemIndex` + `detectVerticalDragGestures` |
-| 6 | 左右两种气泡 | `getItemViewType` + 两种 ViewHolder | `ChatSender` 枚举 + `Row` 的 `Arrangement` 分支 |
-| 7 | 头像放大进详情 | Shared Element / 自定义 Transition | `AVATAR_ZOOM` 的 `scaleIn` / `scaleOut` |
-| 8 | 详情多图左右滑 | `ViewPager` | `HorizontalPager`（头像色块轮播） |
-| 9 | 朋友圈点赞评论实时刷新 | `ViewModel` + `LiveData` / `Observable` | `MutableStateFlow` + `copy` 更新 `momentsByUser` |
-| 10 | 语音通话叠层布局 | `ConstraintLayout` | `Box` + `Modifier.align(Alignment.*)` |
-| 11 | 页面栈复用防 OOM | `FragmentManager` back stack / `singleTop` | `pageStack` + `pushOrReuse` 按 `page.key` 去重 |
-| 12 | **（补充）** 单向数据流 | MVP / 手动 setText | `WeChatIntent` → `processIntent` → `WeChatUiState` |
-| 13 | **（补充）** 列表不在底部提示 | 监听 `RecyclerView` 滚动 | `derivedStateOf` + `AnimatedVisibility`「回到最新消息」 |
-| 14 | **（补充）** UI 本地预览 | Layout Preview | `@Preview` + `VectorDemoTheme`（同文件底部） |
+| 1 | 底部 Tab + 横向分页 | BottomNavigation + ViewPager2 | Scaffold + HorizontalPager + ememberPagerState |
+| 2 | 自定义列表项与会话列表 | 自定义 View + RecyclerView | ContactMessageItem + LazyColumn |
+| 3 | 下拉刷新（假数据） | SwipeRefreshLayout | PullToRefreshBox + ViewModel delay + Toast |
+| 4 | 子页面转场动效（消息/头像缩放） | 转场动画 / sharedElement | AnimatedContent + MESSAGE_ZOOM / AVATAR_ZOOM |
+| 5 | 聊天页列表（双气泡·历史·回到最新） | getItemViewType + 顶部加载 + 滚动监听 | ChatMessageList + ChatSender + AnimatedVisibility |
+| 6 | 详情头像轮播 + 朋友圈 | ViewPager + 网格列表 | HorizontalPager + LazyVerticalGrid + StateFlow |
+| 7 | 语音通话约束布局 | ConstraintLayout | ConstraintLayout（Android）/ Box.align（iOS） |
+| 8 | 通讯录搜索 + 页面栈复用 | 搜索框 + singleTop | ilteredContacts + pushOrReuse |
+| 9 | 页面路由 + MVI | 多 Activity/Fragment | WeChatIntent + pageStack + when(page) |
 
 
 
@@ -1170,7 +1165,7 @@ internal actual fun WeChatVoiceCallLayoutPlatform(
 ```
 
 
-#### 9. 页面栈复用（防循环创建 OOM）
+#### 页面栈复用（防循环创建 OOM）
 
 **XML：** `launchMode="singleTop"`、`FragmentTransaction` 带 tag 复用、或 Navigation `popUpTo` + `launchSingleTop`。
 
@@ -1205,23 +1200,335 @@ internal actual fun WeChatVoiceCallLayoutPlatform(
 
 
 
-### Flutter实现
+### Flutter 实现
 
-[FlutterUI.md](FlutterUI.md)
+Demo 源码：`demo/flutter/flutternew/lib/`（目录分级与 KMP `ui/view/wechat` 对齐）。
+
+| 层级 | 路径 |
+|------|------|
+| 入口 Page | `page/wechat_demo_page.dart` |
+| 根 Screen | `ui/view/wechat/we_chat_demo_screen.dart` |
+| 页面转场 | `ui/view/wechat/we_chat_page_transition.dart` |
+| 自定义组件 | `ui/view/wechat/components/*.dart` |
+| ViewModel | `viewmodel/wechat_demo_vm.dart` |
+| 模型 / Intent | `domain/model/wechat/wechat_models.dart` |
+
+#### 补充后的学习目标
+
+| # | 目标 | XML / 传统 Android 对应 | Flutter 实现要点 |
+|---|------|------------------------|------------------|
+| 1 | 底部 Tab + 横向分页 | `BottomNavigation` + `ViewPager2` | `Scaffold` + `PageView` + `PageController` |
+| 2 | 自定义列表项与会话列表 | 自定义 `View` + `RecyclerView` | `ContactMessageItem` + `ListView` |
+| 3 | 下拉刷新（假数据） | `SwipeRefreshLayout` | `RefreshIndicator` + `delay` + `SnackBar` |
+| 4 | 子页面转场动效（消息/头像缩放） | 转场动画 / `sharedElement` | `WeChatAnimatedContent` 双层 `Stack` + `SpringSimulation` |
+| 5 | 聊天页列表（双气泡·历史·回到最新） | `getItemViewType` + 顶部加载 + 滚动监听 | `ChatMessageList` + `ChatMessageItem` + 滚动监听气泡 |
+| 6 | 详情头像轮播 + 朋友圈 | `ViewPager` + 网格列表 | `PageView` + `GridView` + `ChangeNotifier` |
+| 7 | 语音通话约束布局 | `ConstraintLayout` | `Stack` + `Positioned`（等效约束） |
+| 8 | 通讯录搜索 + 页面栈复用 | 搜索框 + `singleTop` | `TextField` + `filteredContacts` + `pushOrReuse` |
+| 9 | 页面路由 + MVI | 多 Activity/Fragment | `WeChatIntent` + `_pageStack` + `AnimatedBuilder` |
+
+#### 页面管理
+
+##### 路由和栈管理
+
+与 KMP 相同：外层 App 用 `MaterialApp.routes`（`config/app_route.dart`）进入 Demo；**WeChat 内层**不用 `go_router` / `Navigator 2.0` 管理子页，而在 `WeChatDemoVm` 内维护 `_pageStack`（对应 Compose 内存栈，不是 `NavHost`）。
+
+```dart
+// config/app_route.dart
+AppRoutes.wechatUiDemo: (context) => const WeChatDemoPage(),
+
+// manager/catalog_manager.dart — 目录项 id: 13
+CatalogItem(title: 'WeChat UI Demo', routeName: AppRoutes.wechatUiDemo, ...),
+```
+
+**Activity 栈（AMS）** → Flutter 单 `Activity` / 单引擎；跨 Demo 用 `Navigator.pushNamed`，返回 `Navigator.pop`。
+
+**Fragment 栈** → `WeChatDemoScreen` + `WeChatAnimatedContent`：`currentPage` 变化时切换子 Widget（等同 `AnimatedContent` + `when(page)`）。
+
+```dart
+// we_chat_demo_screen.dart
+return WeChatAnimatedContent(
+  page: state.currentPage,
+  navAction: state.navAction,
+  transitionStyle: state.transitionStyle,
+  child: _buildPage(context), // Home / Chat / Profile / VoiceCall
+);
+```
+
+##### Activity
+
+外层 `MainPage` 等仍用命名路由；WeChat Demo 是其中一个路由目标，进入后完全由 `WeChatUiState.currentPage` 驱动 UI（无 Intent 传参）。
+
+##### Fragment
+
+**Fragment → StatelessWidget / StatefulWidget**
+
+子页是独立 Widget 树：`_WeChatHomePage`、`_WeChatChatPage`、`_WeChatProfilePage`、`WeChatVoiceCallLayout`，由 `switch` on `WeChatPage` 类型构建（密封类 `WeChatPageChat(userId)` 等同 Fragment `arguments`）。
+
+#### 底部 Tab + 横向分页
+
+**XML：** 垂直 `LinearLayout`：`ViewPager2` + 底部 `BottomNavigationView`。
+
+**Flutter：** `Scaffold` 的 `appBar` / `bottomNavigationBar` + `body: PageView`；Tab 与页码双向同步（对应 KMP 两个 `LaunchedEffect`）。
+
+```dart
+// we_chat_demo_screen.dart · _WeChatHomePageState
+_pageController = PageController(initialPage: widget.state.activeTab.index);
+
+// 点击 Tab → 翻页
+onTap: () => processIntent(WeChatSelectTab(tab)),
+
+// 滑动 ViewPager → 更新 Tab
+PageView(
+  controller: _pageController,
+  onPageChanged: (index) => processIntent(WeChatSelectTab(WeChatTab.values[index])),
+  children: [_WeChatMessagesPage(...), _WeChatContactsPage(...), const _WeChatDiscoverPage()],
+)
+```
+
+* 布局
+
+| XML / Compose | Flutter |
+|---------------|---------|
+| `LinearLayout` vertical | `Column` |
+| `LinearLayout` horizontal | `Row` |
+| `layout_weight` | `Expanded` / `Flexible` |
+| `FrameLayout` | `Stack` |
+| `ConstraintLayout` | `Stack` + `Positioned` 或第三方 `flutter_constraintlayout` |
+
+```dart
+Column(children: [...])           // 垂直
+Row(children: [Expanded(child: ...)])  // 水平 + weight
+Stack(children: [...])            // 层叠
+```
+
+* 页面骨架
+
+`Scaffold` ≈ 带 `AppBar` + `body` + `bottomNavigationBar` 的整页骨架（对应 Compose `Scaffold`）。
+
+* 常用控件
+
+```text
+TextView        → Text
+Button          → ElevatedButton / FilledButton / TextButton
+ImageView       → Image / Image.asset
+EditText        → TextField
+RecyclerView    → ListView / ListView.builder
+ScrollView      → SingleChildScrollView / ListView
+ViewPager2      → PageView
+CardView        → Card
+```
+
+* 宽高与边距
+
+```text
+match_parent     → SizedBox.expand() / width: double.infinity
+wrap_content     → 不指定尺寸（子组件固有大小）
+padding          → Padding(padding: EdgeInsets.all(10))
+```
+
+#### 自定义列表
+
+**XML：** 消息 Tab = `RecyclerView` + 自定义行；聊天 = 左右两种 `ViewHolder`。
+
+**Flutter：** `contact_message_item.dart`、`chat_message_item.dart`、`chat_message_list.dart`；列表容器 `ListView.separated`（对应 `LazyColumn` / `RecyclerView`）。
+
+```text
+RecyclerView                    → ListView + ScrollController
+Adapter + ViewHolder            → itemBuilder 返回独立 Widget
+getItemViewType                 → ChatSender.me 分支布局
+notifyDataSetChanged            → ChangeNotifier.notifyListeners()
+```
+
+##### 自定义列表项 Item
+
+```dart
+// contact_message_item.dart — 消息 Tab 会话行
+class ContactMessageItem extends StatelessWidget {
+  // WeChatAvatar + 名称 + 预览 + 时间 + 未读红点
+}
+
+// chat_message_item.dart — 聊天气泡
+final isMe = message.sender == ChatSender.me;
+Row(
+  mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+  children: [/* 头像 + 气泡 */],
+);
+```
+
+##### 自定义列表
+
+```dart
+// chat_message_list.dart
+ListView.separated(
+  controller: scrollController,
+  itemCount: messages.length + 2, // header「下拉加载更早」+ footer
+  ...
+);
+
+// 顶部下拉加载历史：NotificationListener<ScrollNotification>
+// 条件：pixels <= 0 且向下拖 + canLoadMoreHistory → onLoadMoreHistory
+```
+
+`WeChatChatPage` 中 `ScrollController` 监听实现「回到最新消息」悬浮气泡（对应 KMP `derivedStateOf` + `AnimatedVisibility`）。
+
+#### 下拉刷新
+
+**XML：** `SwipeRefreshLayout` 包裹列表。
+
+**Flutter：** `RefreshIndicator` + ViewModel 延迟；Effect 在 Page 层展示 `SnackBar`。
+
+```dart
+RefreshIndicator(
+  onRefresh: () async {
+    processIntent(const WeChatRefreshMessages());
+    await Future.delayed(const Duration(seconds: 2));
+  },
+  child: ListView.separated(...),
+)
+```
+
+```dart
+// wechat_demo_vm.dart
+_emitEffect(const WeChatShowToast('刷新成功'));
+
+// wechat_demo_page.dart
+_vm.effects.listen((e) {
+  if (e is WeChatShowToast) ScaffoldMessenger.of(context).showSnackBar(...);
+});
+```
+
+#### 消息项缩放进入聊天页
+
+**说明：** Flutter **可以**做与 KMP 相同的进/出叠层缩放，不是 Compose 独有；关键是**同时**渲染离场页与进场页并分别计算 opacity / scale（对应 `fadeIn+scaleIn togetherWith fadeOut+scaleOut`）。
+
+**Compose：** `AnimatedContent` + `weChatTransitionSpec`。
+
+**Flutter：** `WeChatAnimatedContent`（`we_chat_page_transition.dart`）缓存 `oldWidget.child`，`Stack` 两层 + `SpringSimulation`。
+
+| 样式 | PUSH 进场 | PUSH 离场 |
+|------|-----------|-----------|
+| `messageZoom` | 0.85→1 淡入 | 1→1.03 淡出 |
+| `avatarZoom` | 0.7→1 淡入 | 1→1.06 淡出 |
+
+```dart
+// wechat_demo_vm.dart
+_openChat(userId, WeChatTransitionStyle.messageZoom);
+_openProfile(userId, WeChatTransitionStyle.avatarZoom);
+
+// we_chat_page_transition.dart — 与 KMP weChatTransitionSpec 数值对齐
+final spec = _zoomSpec(widget.navAction, widget.transitionStyle);
+// 进场 opacity: t, scale: lerp(enterScaleBegin, 1, t)
+// 离场 opacity: 1-t, scale: lerp(1, exitScaleEnd, t)
+```
+
+#### 详情页头像 ViewPager
+
+**XML：** 顶部 `ViewPager2` 正方形头像区。
+
+**Flutter：** `PageView.builder` + `AspectRatio(aspectRatio: 1)`（`we_chat_demo_screen.dart` · `_WeChatProfilePage`）。
+
+```dart
+PageView.builder(
+  controller: _avatarPageController,
+  itemCount: palette.length,
+  itemBuilder: (_, page) => ColoredBox(
+    color: Color(palette[page]),
+    child: Center(child: Text(contact.name)),
+  ),
+)
+```
+
+#### 朋友圈：九宫格 + ViewModel 驱动 UI 更新
+
+##### 网格布局
+
+**XML：** `GridView` / `RecyclerView` + `GridLayoutManager`。
+
+**Flutter：** `moment_photo_grid.dart` — `LayoutBuilder` 算 cell 宽高，`GridView.builder` 固定 3 列、`physics: NeverScrollableScrollPhysics`（对应 `LazyVerticalGrid` + 固定高度）。
+
+```dart
+final cellSize = (constraints.maxWidth - spacing * 2) / 3;
+final rows = (photos.length + 2) ~/ 3;
+final gridHeight = cellSize * rows + spacing * (rows - 1).clamp(0, rows);
+```
+
+##### ViewModel 数据联动
+
+**XML + LiveData：** 必须 `observe()` 后手动改 View。
+
+**Flutter：** `ChangeNotifier` + `AnimatedBuilder`；业务状态在 `WeChatDemoVm`，组件局部状态用 `StatefulWidget`（如 `MomentCard` 内评论输入框）。
+
+```dart
+// 点赞 — wechat_demo_vm.dart
+void _toggleMomentLike(...) {
+  _update(_state.copyWith(momentsByUser: updated));
+}
+
+// UI 自动重建 — wechat_demo_page.dart
+AnimatedBuilder(
+  animation: _vm,
+  builder: (_, __) => WeChatDemoScreen(state: _vm.state, ...),
+);
+```
+
+| Compose | Flutter |
+|---------|---------|
+| `MutableStateFlow` | `ChangeNotifier` + `notifyListeners` |
+| `collectAsState()` | `AnimatedBuilder` / `ListenableBuilder` |
+| 参数变化触发重组 | `state` 传入子 Widget，父 `notifyListeners` 后重建 |
+
+* Screen 级：状态必须在 `WeChatDemoVm`，不要写在页面 `setState` 里做业务逻辑。
+
+* 组件级：`MomentCard` 内 `TextEditingController` 仅存输入框草稿。
+
+#### Flutter 约束布局（Stack + Positioned）
+
+**XML：** `ConstraintLayout` 锚定返回键、居中头像、底栏双按钮。
+
+**Flutter：** `we_chat_voice_call_layout.dart` 用 `Stack` + `Positioned` + `LayoutBuilder` 表达同等约束（本 Demo 不额外引包，学习阶段与 KMP iOS 的 `Box.align` 思路一致）。
+
+```dart
+Stack(
+  children: [
+    Positioned(top: 24, left: (w - 48) / 2, child: /* 返回 */),
+    Positioned(left: (w - 180) / 2, top: (h - 180) / 2, child: WeChatAvatar(size: 180, ...)),
+    Positioned(left: 24, bottom: 34, child: FilledButton(/* 静音 */)),
+    Positioned(right: 24, bottom: 34, child: FilledButton(/* 挂断 */)),
+  ],
+)
+```
+
+| Compose ConstraintLayout | Flutter |
+|------------------------|---------|
+| `createRefs()` | `Stack` 子节点 |
+| `constrainAs` + `linkTo` | `Positioned` / `Align` |
+| `Dimension.fillToConstraints` | `left` + `right` 同时约束 |
+
+#### 页面栈复用（防循环创建 OOM）
+
+**XML：** `launchMode="singleTop"`、Fragment 回栈去重。
+
+**Flutter：** 与 KMP 相同逻辑的 `pushOrReuse`：
+
+```dart
+void _pushOrReuse(WeChatPage nextPage, WeChatTransitionStyle style) {
+  final existingIndex = _pageStack.indexWhere((p) => p.key == nextPage.key);
+  if (existingIndex >= 0) {
+    while (_pageStack.length > existingIndex + 1) {
+      _pageStack.removeLast();
+    }
+    _publishNavState(WeChatNavAction.pop, style);
+  } else {
+    _pageStack.add(nextPage);
+    _publishNavState(WeChatNavAction.push, style);
+  }
+}
+```
+
+`WeChatPageChat(userId).key` → `"chat:$userId"`。典型循环：消息 → 聊天 → 头像 → 详情 → 发消息 → 聊天，栈内同 userId 的 Chat/Profile 只保留一份。
+
+通讯录：`WeChatUpdateContactQuery` + `filteredContacts` getter（`wechat_models.dart`）。
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+更细的 Flutter 笔记可继续写在 [FlutterUI.md](FlutterUI.md)。
