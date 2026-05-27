@@ -1417,18 +1417,189 @@ class WeChatDemoScreen extends StatelessWidget {
 **Flutter：** `Scaffold` 的 `appBar` / `bottomNavigationBar` + `body: PageView`；Tab 与页码双向同步（对应 KMP 两个 `LaunchedEffect`）。
 
 ```dart
-// we_chat_demo_screen.dart · _WeChatHomePageState
-_pageController = PageController(initialPage: widget.state.activeTab.index);
+// ==============================
+// 底部导航三个页面：消息、联系人、发现
+// 对应 Android BottomNavigationView 的三个Item
+// ==============================
+enum WeChatTab { messages, contacts, discover }
 
-// 点击 Tab → 翻页
-onTap: () => processIntent(WeChatSelectTab(tab)),
+// ==============================
+// 全局UI状态（来自ViewModel/Store）
+// 单一数据源 MVI 模式
+// ==============================
+class WeChatUiState {
+  // 当前选中的底部Tab
+  final WeChatTab activeTab;
+}
 
-// 滑动 ViewPager → 更新 Tab
-PageView(
-  controller: _pageController,
-  onPageChanged: (index) => processIntent(WeChatSelectTab(WeChatTab.values[index])),
-  children: [_WeChatMessagesPage(...), _WeChatContactsPage(...), const _WeChatDiscoverPage()],
-)
+// ==============================
+// 主页（有状态组件）
+// 接收外部状态 + 回调事件
+// ==============================
+class _WeChatHomePage extends StatefulWidget {
+  // 页面状态（来自VM）
+  final WeChatUiState state;
+  // 页面事件回调（发送意图给VM）
+  final WeChatProcessIntent processIntent;
+
+  const _WeChatHomePage({
+    required this.state,
+    required this.processIntent,
+  });
+
+  @override
+  State<_WeChatHomePage> createState() => _WeChatHomePageState();
+}
+
+// ==============================
+// 主页状态（控制PageView滑动、动画、生命周期）
+// ==============================
+class _WeChatHomePageState extends State<_WeChatHomePage> {
+  // PageView控制器：管理滑动、页码、动画
+  // 对应 Android ViewPager2.ViewPager2()
+  late PageController _pageController;
+
+  // ==============================
+  // 初始化：只走一次
+  // ==============================
+  @override
+  void initState() {
+    super.initState();
+    // 根据当前选中的tab索引，初始化PageView位置
+    _pageController = PageController(initialPage: widget.state.activeTab.index);
+  }
+
+  // ==============================
+  // 组件更新（外部state变化时触发）
+  // 作用：VM状态变化 → 同步PageView页码
+  // 对应 Android StateFlow 观察刷新
+  // ==============================
+  @override
+  void didUpdateWidget(covariant _WeChatHomePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    // 如果【新选中的Tab】≠【旧Tab】
+    // 并且PageView已绑定上下文
+    // 并且当前PageView页码≠目标页码
+    if (oldWidget.state.activeTab != widget.state.activeTab &&
+        _pageController.hasClients &&
+        _pageController.page?.round() != widget.state.activeTab.index) {
+      // 执行PageView翻页动画（平滑切换）
+      _pageController.animateToPage(
+        widget.state.activeTab.index, // 目标页码
+        duration: const Duration(milliseconds: 280), // 动画时长
+        curve: Curves.easeOut, // 动画插值器
+      );
+    }
+  }
+
+  // ==============================
+  // 销毁：释放控制器，防止内存泄漏
+  // ==============================
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  // ==============================
+  // 页面构建UI
+  // ==============================
+  @override
+  Widget build(BuildContext context) {
+    // Scaffold = 页面骨架（AppBar + 内容 + 底部导航）
+    return Scaffold(
+      // 顶部标题栏
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF1F1F1F),
+        foregroundColor: Colors.white,
+        elevation: 0,
+        leading: TextButton(
+          onPressed: widget.onBackToCatalog,
+          child: const Text('返回', style: TextStyle(color: Colors.white)),
+        ),
+        title: const Text('WeChat UI Demo'),
+        centerTitle: true,
+      ),
+
+      // ==============================
+      // 底部导航栏（自定义，非系统BottomNav）
+      // 三个可点击文字：消息、联系人、发现
+      // ==============================
+      bottomNavigationBar: ColoredBox(
+        color: const Color(0xFFF6F6F6),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: WeChatTab.values.map((tab) {
+              // 判断当前tab是否选中
+              final selected = tab == widget.state.activeTab;
+              return GestureDetector(
+                // 点击 → 发送切换Tab意图
+                onTap: () => widget.processIntent(WeChatSelectTab(tab)),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  child: Text(
+                    weChatTabTitle(tab),
+                    style: TextStyle(
+                      color: selected
+                          ? const Color(0xFF1AAD19) // 选中绿色
+                          : const Color(0xFF777777), // 未选中灰色
+                      fontWeight:
+                      selected ? FontWeight.bold : FontWeight.normal,
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+      ),
+      
+      // ==============================
+      // PageView 可滑动页面（三页切换）
+      // 对应 Android ViewPager2
+      // ==============================
+      body: PageView(
+        // pageController: 页面管理
+        controller: _pageController,
+        onPageChanged: (index) {
+          final tab = WeChatTab.values[index];
+          if (tab != widget.state.activeTab) {
+            // 手动滑动 → intent 通知VM切换选中Tab
+            widget.processIntent(WeChatSelectTab(tab));
+          }
+        },
+        // 三个子页面
+        children: [
+          _WeChatMessagesPage(state: widget.state, processIntent: widget.processIntent),
+          _WeChatContactsPage(state: widget.state, processIntent: widget.processIntent),
+          const _WeChatDiscoverPage(),
+        ],
+      ),
+    );
+  }
+}
+```
+
+
+_WeChatHomePage = Activity 类
+- 它是 “页面的壳”
+- 持有页面需要的参数（state、processIntent）
+- 自己不做 UI，只创建状态
+
+
+_WeChatHomePageState = 真正的 Activity 本体
+StatefulWidget + State 组合 = Android Activity
+```dart
+class _WeChatHomePageState extends State<_WeChatHomePage> { /* ... */ }
+```
+
+```text
+onCreate → initState()
+onDestroy → dispose()
+setContentView → build()
 ```
 
 * 布局
@@ -1442,14 +1613,25 @@ PageView(
 | `ConstraintLayout` | `Stack` + `Positioned` 或第三方 `flutter_constraintlayout` |
 
 ```dart
-Column(children: [...])           // 垂直
-Row(children: [Expanded(child: ...)])  // 水平 + weight
-Stack(children: [...])            // 层叠
+Widget build(BuildContext context) {
+  return Scaffold(
+      Column(children: [/* ... */]),                  // 垂直
+      Row(children: [Expanded(child: [/* ... */])]),  // 水平 + weight
+      Stack(children: [/* ... */]),                   // 层叠
+      Positioned(                                     // 约束
+        left: 0,
+        right: 0,
+        bottom: 72,
+        child: Center(),
+      ),
+  );
+}
 ```
 
 * 页面骨架
 
 `Scaffold` ≈ 带 `AppBar` + `body` + `bottomNavigationBar` 的整页骨架（对应 Compose `Scaffold`）。
+Scaffold = `R.layout.main_activity`
 
 * 常用控件
 
@@ -1467,9 +1649,29 @@ CardView        → Card
 * 宽高与边距
 
 ```text
-match_parent     → SizedBox.expand() / width: double.infinity
-wrap_content     → 不指定尺寸（子组件固有大小）
-padding          → Padding(padding: EdgeInsets.all(10))
+match_parent         → SizedBox.expand() / width: double.infinity / height: double.infinity
+wrap_content         → 不写宽高（Flutter 自动包裹内容）
+layout_margin         → 外层 Padding（Flutter 无 margin，用 Padding 替代）
+padding               → Padding(padding: EdgeInsets.all(10))
+```
+
+```text
+# 1. match_parent 宽高铺满
+layout_width="match_parent"
+layout_height="match_parent"
+
+Container(
+  width: double.infinity,
+  height: double.infinity,
+)
+
+# 2. padding 内边距
+android:padding="10dp"
+
+Padding(
+  padding: EdgeInsets.all(10),
+  child: Text("带内边距"),
+)
 ```
 
 #### 自定义列表
@@ -1486,6 +1688,8 @@ notifyDataSetChanged            → ChangeNotifier.notifyListeners()
 ```
 
 ##### 自定义列表项 Item
+
+**StatelessWidget 与 StatefulWidget**
 
 ```dart
 // contact_message_item.dart — 消息 Tab 会话行
