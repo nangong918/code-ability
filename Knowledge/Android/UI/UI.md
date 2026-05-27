@@ -1251,7 +1251,7 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(...);
+    return MaterialApp(/*...*/);
   }
 }
 ```
@@ -1286,6 +1286,7 @@ appRoutes 路由表 把「字符串路由名称」 → 映射到「具体页面 
 相当于 AndroidManifest.xml 里注册所有 Activity
 
 ```dart
+// config/app_route.dart
 final Map<String, WidgetBuilder> appRoutes = {
   AppRoutes.start: (BuildContext context) {
     return const StartPage();
@@ -1321,40 +1322,92 @@ WidgetBuilder = 一个接收 context，返回 Widget 的函数
 
 * 页面跳转
 
+页面跳转分别使用 `Navigator.pushNamed` 和 `Navigator.pushNamedAndRemoveUntil`，含义分别是：
+- `Navigator.pushNamed`：跳转到指定页面，并入栈
+- `Navigator.pushNamedAndRemoveUntil`：跳转到指定页面，并出栈所有指定页面之前的页面
+
 ```dart
-  // 跳转并清空栈 
+// 出栈
+Future<void> _confirmLogout() async {
+  final shouldLogout = await showDialog<bool>(
+    context: context,
+  );
+  // 跳转并出栈
   Navigator.pushNamedAndRemoveUntil(
     context,
     AppRoutes.login,
-    (route) => false,
+        (route) => false,
   );
+}
   // 跳转
-  Navigator.pushNamed(context, item.routeName!);
+class _LoginPageState extends State<LoginPage> {
+  late final LoginVm _vm;
+  StreamSubscription<LoginEffect>? _effectSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _vm = LoginVm();
+    _effectSub = _vm.effects.listen(_consumeEffect);
+  }
+
+  // 副作用流
+  void _consumeEffect(LoginEffect effect) {
+    if (effect is LoginNavigateToMain) {
+      // 跳转并出栈
+      Navigator.pushNamedAndRemoveUntil(context, AppRoutes.main, (route) => false);
+    } else if (effect is LoginNavigateToRegister) {
+      // 跳转
+      Navigator.pushNamed(context, AppRoutes.register);
+    }
+  }
+}
+
 ```
 
-与 KMP 相同：外层 App 用 `MaterialApp.routes`（`config/app_route.dart`）进入 Demo；
-**WeChat 内层**不用 `go_router` / `Navigator 2.0` 管理子页，而在 `WeChatDemoVm` 内维护 `_pageStack`（对应 Compose 内存栈，不是 `NavHost`）。
-
-```dart
-// config/app_route.dart
-AppRoutes.wechatUiDemo: (context) => const WeChatDemoPage(),
-
-// manager/catalog_manager.dart — 目录项 id: 13
-CatalogItem(title: 'WeChat UI Demo', routeName: AppRoutes.wechatUiDemo, ...),
-```
+外层 App 用 `MaterialApp.routes`（`config/app_route.dart`）进入 Demo；
+**WeChat 内层** 在 `WeChatDemoVm` 内维护 `_pageStack`（对应 Compose 内存栈）。
 
 **Activity 栈（AMS）** → Flutter 单 `Activity` / 单引擎；跨 Demo 用 `Navigator.pushNamed`，返回 `Navigator.pop`。
 
 **Fragment 栈** → `WeChatDemoScreen` + `WeChatAnimatedContent`：`currentPage` 变化时切换子 Widget（等同 `AnimatedContent` + `when(page)`）。
 
 ```dart
-// we_chat_demo_screen.dart
-return WeChatAnimatedContent(
-  page: state.currentPage,
-  navAction: state.navAction,
-  transitionStyle: state.transitionStyle,
-  child: _buildPage(context), // Home / Chat / Profile / VoiceCall
-);
+/// 微信 UI Demo 根 Screen（对应 KMP WeChatDemoScreen）
+class WeChatDemoScreen extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return WeChatAnimatedContent(
+      page: state.currentPage,
+      navAction: state.navAction,
+      transitionStyle: state.transitionStyle,
+      child: _buildPage(context),
+    );
+  }
+
+  // 构建页面
+  Widget _buildPage(BuildContext context) {
+    final page = state.currentPage;
+    // 主页
+    if (page is WeChatPageHome) {
+      return _WeChatHomePage(
+        state: state,
+        processIntent: processIntent,
+        onBackToCatalog: onBackToCatalog,
+      );
+    }
+    // 聊天
+    if (page is WeChatPageChat) {
+      return _WeChatChatPage(
+        state: state,
+        userId: page.userId,
+        processIntent: processIntent,
+      );
+    }
+    return const SizedBox.shrink();
+  }
+}
+
 ```
 
 #### 底部 Tab + 横向分页
