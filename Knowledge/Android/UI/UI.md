@@ -1993,9 +1993,10 @@ Widget build(BuildContext context) {
 
 **XML：** 顶部 `ViewPager2` 正方形头像区。
 
-**Flutter：** `PageView.builder` + `AspectRatio(aspectRatio: 1)`（`we_chat_demo_screen.dart` · `_WeChatProfilePage`）。
+**Flutter：** `PageView.builder` + `AspectRatio(aspectRatio: 1)`
+依托于 PageController
 
-```dart
+```text
 PageView.builder(
   controller: _avatarPageController,
   itemCount: palette.length,
@@ -2024,19 +2025,14 @@ final gridHeight = cellSize * rows + spacing * (rows - 1).clamp(0, rows);
 
 **XML + LiveData：** 必须 `observe()` 后手动改 View。
 
-**Flutter：** `ChangeNotifier` + `AnimatedBuilder`；业务状态在 `WeChatDemoVm`，组件局部状态用 `StatefulWidget`（如 `MomentCard` 内评论输入框）。
+**Flutter：** `ChangeNotifier` + `AnimatedBuilder`；
+业务状态在 `WeChatDemoVm`，组件局部状态用 `StatefulWidget`（如 `MomentCard` 内评论输入框）。
 
 ```dart
 // 点赞 — wechat_demo_vm.dart
-void _toggleMomentLike(...) {
+void _toggleMomentLike(String userId, String momentId) {
   _update(_state.copyWith(momentsByUser: updated));
 }
-
-// UI 自动重建 — wechat_demo_page.dart
-AnimatedBuilder(
-  animation: _vm,
-  builder: (_, __) => WeChatDemoScreen(state: _vm.state, ...),
-);
 ```
 
 | Compose | Flutter |
@@ -2056,14 +2052,18 @@ AnimatedBuilder(
 **Flutter：** `we_chat_voice_call_layout.dart` 用 `Stack` + `Positioned` + `LayoutBuilder` 表达同等约束（本 Demo 不额外引包，学习阶段与 KMP iOS 的 `Box.align` 思路一致）。
 
 ```dart
-Stack(
-  children: [
-    Positioned(top: 24, left: (w - 48) / 2, child: /* 返回 */),
-    Positioned(left: (w - 180) / 2, top: (h - 180) / 2, child: WeChatAvatar(size: 180, ...)),
-    Positioned(left: 24, bottom: 34, child: FilledButton(/* 静音 */)),
-    Positioned(right: 24, bottom: 34, child: FilledButton(/* 挂断 */)),
-  ],
-)
+Widget build(BuildContext context) {
+  return Scaffold(
+    body: Stack(
+      children: [
+        Positioned(top: 24, left: (w - 48) / 2, child: [/* 返回 */]),
+        Positioned(left: (w - 180) / 2, top: (h - 180) / 2, child: WeChatAvatar(size: 180, /* ... */)),
+        Positioned(left: 24, bottom: 34, child: FilledButton(/* 静音 */)),
+        Positioned(right: 24, bottom: 34, child: FilledButton(/* 挂断 */)),
+      ],
+    )
+  );
+}
 ```
 
 | Compose ConstraintLayout | Flutter |
