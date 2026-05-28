@@ -20,8 +20,13 @@ todo：把灵境AI 整理到麒麟
 | 5/13~5/15 | 1. 整理项目, 层层落地最底层理论 2. 梳理简历                                                                         | 完成项目梳理                                 |
 | 5/16~5/17 | 1. 学习RK烧录, 烧录Android 2. 烧录Apk 3. 梳理Android Framework相关定制, 定制前面板Apk                                 | 烧录为推进，转向UI                             |
 | 5/18~5/20 | 整理KMP，Flutter的MVI设计模式以及UI，Android Framework AOSP                                                   | 未进行AOSP，已完成KMP的UI Demo，待总结，待迁移到Flutter |
-| 5/21~5/23 | 1. 梳理Jetpack Compose UI文档 2. UI Demo复刻到Flutter 3. 梳理KMP文档 4. 梳理Flutter UI文档                        |                                        |
-|           | 启动RK并探索内部结构；烧录系统App并运行；整理RK相关知识                                                                    |                                        |
+| 5/21~5/23 | 1. 梳理Jetpack Compose UI文档 2. UI Demo复刻到Flutter 3. 梳理KMP文档 4. 梳理Flutter UI文档                        | 5/21~5/28完成 UI文档                       |
+|           | 梳理C++，并新增C++相关文档                                                                                   |                                        |
+|           | 修复KMP中的KNI调用，并总结KMP文档                                                                              |                                        |
+|           | 启动RK并探索内部结构；远端查看RK-Android系统内部画面；烧录系统App并运行；整理RK相关知识                                               |                                        |
+|           | 总结 RK芯片，外设 与 `计算机组成原理`                                                                             |                                        |
+|           | 总结 RK-Android系统 与 `操作系统`                                                                           |                                        |
+|           | 尝试采集摄像头并传输 App上 总结 音视频流媒体数据传输 与 `计算机网络`                                                            |                                        |
 
 
 ## 代办计划
