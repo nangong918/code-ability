@@ -1892,80 +1892,102 @@ class CounterItem extends StatelessWidget {
 class ContactMessageItem extends StatelessWidget {
   // WeChatAvatar + 名称 + 预览 + 时间 + 未读红点
 }
-
-// chat_message_item.dart — 聊天气泡
-final isMe = message.sender == ChatSender.me;
-Row(
-  mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-  children: [/* 头像 + 气泡 */],
-);
 ```
 
-##### 自定义列表
+##### 自定义列表 + 下拉刷新
+
+
+Flutter ↔ Android ↔ Compose 列表对应表
+
+1. ListView.separated
+   = Android RecyclerView + 线性布局
+   = Compose LazyColumn
+
+2. itemCount
+   = Android adapter.getItemCount()
+   = Compose list.size
+
+3. itemBuilder
+   = Android onCreateViewHolder + onBindViewHolder
+   = Compose LazyColumn { items{ ... } }
+
+4. ContactMessageItem（StatelessWidget）
+   = Android ViewHolder
+   = Compose 列表项 @Composable 函数
+
+5. separatorBuilder
+   = Android ItemDecoration（分割线）
+   = Compose Divider
+
+6. RefreshIndicator
+   = Android SwipeRefreshLayout
+   = Compose PullRefreshIndicator
+
 
 ```dart
-// chat_message_list.dart
-ListView.separated(
-  controller: scrollController,
-  itemCount: messages.length + 2, // header「下拉加载更早」+ footer
-  ...
-);
+Widget build(BuildContext context) {
+  // 下拉刷新组件
+  // 对应 Android：SwipeRefreshLayout
+  // 对应 Compose：PullRefreshIndicator
+  return RefreshIndicator(
+    onRefresh: () async {
+      processIntent(const WeChatRefreshMessages());
+      await Future<void>.delayed(const Duration(seconds: 2));
+    },
 
-// 顶部下拉加载历史：NotificationListener<ScrollNotification>
-// 条件：pixels <= 0 且向下拖 + canLoadMoreHistory → onLoadMoreHistory
+    // ------------------------------
+    // ListView.separated
+    // 核心：带分割线的线性列表
+    // ------------------------------
+    child: ListView.separated(
+      // 滑动效果（始终可滑动）
+      physics: const AlwaysScrollableScrollPhysics(),
+
+      // 列表总条数
+      // 对应 Android：adapter.getItemCount()
+      // 对应 Compose：items.size
+      itemCount: state.messagePreviews.length,
+
+      // 分割线构造器
+      // 对应 Android：RecyclerView.ItemDecoration
+      // 对应 Compose：LazyListItemScope 里的 Divider
+      separatorBuilder: (_, __) => const Divider(height: 1, color: Color(0xFFEDEDED)),
+
+      // item 构造器（创建每一行）
+      // 对应 Android：onCreateViewHolder + onBindViewHolder
+      // 对应 Compose：LazyColumn(items) { ... }
+      itemBuilder: (context, index) {
+        // 获取当前 index 对应的数据
+        // 对应 Android：list.get(index)
+        // 对应 Compose：val item = list[index]
+        final preview = state.messagePreviews[index];
+        final contact = state.contacts
+            .where((c) => c.id == preview.contactId)
+            .firstOrNull;
+
+        // 返回每一行的 Item（纯展示组件 Stateless）
+        // 对应 Android：ViewHolder.itemView
+        // 对应 Compose：ListItem Composable
+        return ContactMessageItem(
+          preview: preview,
+          contact: contact,
+          onClick: () =>
+              processIntent(WeChatOpenChatFromMessage(preview.contactId)),
+          onAvatarClick: () =>
+              processIntent(WeChatOpenProfileFromAvatar(preview.contactId)),
+        );
+      },
+    ),
+  );
+}
 ```
 
 `WeChatChatPage` 中 `ScrollController` 监听实现「回到最新消息」悬浮气泡（对应 KMP `derivedStateOf` + `AnimatedVisibility`）。
-
-#### 下拉刷新
 
 **XML：** `SwipeRefreshLayout` 包裹列表。
 
 **Flutter：** `RefreshIndicator` + ViewModel 延迟；Effect 在 Page 层展示 `SnackBar`。
 
-```dart
-RefreshIndicator(
-  onRefresh: () async {
-    processIntent(const WeChatRefreshMessages());
-    await Future.delayed(const Duration(seconds: 2));
-  },
-  child: ListView.separated(...),
-)
-```
-
-```dart
-// wechat_demo_vm.dart
-_emitEffect(const WeChatShowToast('刷新成功'));
-
-// wechat_demo_page.dart
-_vm.effects.listen((e) {
-  if (e is WeChatShowToast) ScaffoldMessenger.of(context).showSnackBar(...);
-});
-```
-
-#### 消息项缩放进入聊天页
-
-**说明：** Flutter **可以**做与 KMP 相同的进/出叠层缩放，不是 Compose 独有；关键是**同时**渲染离场页与进场页并分别计算 opacity / scale（对应 `fadeIn+scaleIn togetherWith fadeOut+scaleOut`）。
-
-**Compose：** `AnimatedContent` + `weChatTransitionSpec`。
-
-**Flutter：** `WeChatAnimatedContent`（`we_chat_page_transition.dart`）缓存 `oldWidget.child`，`Stack` 两层 + `SpringSimulation`。
-
-| 样式 | PUSH 进场 | PUSH 离场 |
-|------|-----------|-----------|
-| `messageZoom` | 0.85→1 淡入 | 1→1.03 淡出 |
-| `avatarZoom` | 0.7→1 淡入 | 1→1.06 淡出 |
-
-```dart
-// wechat_demo_vm.dart
-_openChat(userId, WeChatTransitionStyle.messageZoom);
-_openProfile(userId, WeChatTransitionStyle.avatarZoom);
-
-// we_chat_page_transition.dart — 与 KMP weChatTransitionSpec 数值对齐
-final spec = _zoomSpec(widget.navAction, widget.transitionStyle);
-// 进场 opacity: t, scale: lerp(enterScaleBegin, 1, t)
-// 离场 opacity: 1-t, scale: lerp(1, exitScaleEnd, t)
-```
 
 #### 详情页头像 ViewPager
 
