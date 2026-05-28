@@ -1678,7 +1678,7 @@ Padding(
 
 **XML：** 消息 Tab = `RecyclerView` + 自定义行；聊天 = 左右两种 `ViewHolder`。
 
-**Flutter：** `contact_message_item.dart`、`chat_message_item.dart`、`chat_message_list.dart`；列表容器 `ListView.separated`（对应 `LazyColumn` / `RecyclerView`）。
+**Flutter：** 列表容器 `ListView.separated`（对应 `LazyColumn` / `RecyclerView`）。
 
 ```text
 RecyclerView                    → ListView + ScrollController
@@ -1687,9 +1687,205 @@ getItemViewType                 → ChatSender.me 分支布局
 notifyDataSetChanged            → ChangeNotifier.notifyListeners()
 ```
 
-##### 自定义列表项 Item
 
-**StatelessWidget 与 StatefulWidget**
+
+##### StatelessWidget 与 StatefulWidget
+
+在页面设计中，Screen级别（Page页面）需要`StatefulWidget`，view的状态要存储在内部。
+自定义view（Item）需要`StatelessWidget`，Item 自己没有状态，所有数据都靠外部传进来。
+
+核心规则：Stateless vs Stateful 变量限制
+* StatelessWidget（组件/Item）
+  - 内部**只能放 final 常量**
+    - 注意：Flutter 里的 final ≠ 数据不能变，这个变量指针被锁定，不能再指向别的对象。
+    - dart：final int count;
+    - c++：int* const count; // 指针本身不能变
+  - 不能放可变变量（不能放普通int、String、bool）
+  - 一旦创建，**不可改变**
+  - 作用：纯展示、纯渲染、无状态
+
+* StatefulWidget（页面）
+  - 放在 State 里的变量**可以随便改**
+  - 可以是普通变量、控制器、动态值
+  - 改变后调用 setState() 就能刷新 UI
+  - 作用：管理 UI 状态、生命周期、控制器
+
+
+所以对于这两者的理解可以总结为：
+1. Android里面的那种简单的`fragment`可以直接用`StatefulWidget`然后就不使用`viewmodel`了
+2. 页面是可以实现全部view变量控制交给`viewmodel`管理的，也就意味着完全可以也用`StatelessWidget`
+
+所以引申出三种场景：
+* `局部状态页面`
+Compose = remember（无 ViewModel）
+```kotlin
+@Composable
+fun SimpleCounterScreen() {
+    // 局部 UI 状态（像 Flutter State）
+    val count = remember { mutableStateOf(0) }
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("计数：${count.value}")
+        Button(onClick = { count.value++ }) {
+            Text("加一")
+        }
+    }
+}
+```
+Flutter = StatefulWidget（无 ViewModel）
+```dart
+class SimpleCounterPage extends StatefulWidget {
+  const SimpleCounterPage({super.key});
+
+  @override
+  State<SimpleCounterPage> createState() => _SimpleCounterPageState();
+}
+
+class _SimpleCounterPageState extends State<SimpleCounterPage> {
+  // 局部 UI 状态（对应 Compose remember）
+  int count = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text("计数：$count"),
+            ElevatedButton(
+              onPressed: () {
+                setState(() {
+                  count++;
+                });
+              },
+              child: const Text("加一"),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+```
+
+* 带 ViewModel 的标准页面（MVI/UDF）
+Compose + ViewModel（MutableState）
+```kotlin
+// VM
+class CounterVm : ViewModel() {
+    val count = mutableStateOf(0)
+    fun increment() {
+        count.value++
+    }
+}
+
+// Screen（Compose 天然就是 Stateless 组合函数）
+@Composable
+fun CounterVmScreen() {
+    val vm: CounterVm = viewModel()
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("计数：${vm.count.value}")
+        Button(onClick = { vm.increment() }) {
+            Text("加一")
+        }
+    }
+}
+```
+Flutter + ChangeNotifier VM + Stateless 页面
+```dart
+// VM
+class CounterVm extends ChangeNotifier {
+  int count = 0;
+
+  void increment() {
+    count++;
+    notifyListeners();
+  }
+}
+
+// 页面完全 Stateless（全靠 VM）
+class CounterVmPage extends StatelessWidget {
+  const CounterVmPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final vm = Provider.of<CounterVm>(context);
+
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text("计数：${vm.count}"),
+            ElevatedButton(
+              onPressed: vm.increment,
+              child: const Text("加一"),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+```
+
+* 自定义组件（纯展示、无状态）
+Compose = 无状态组件
+```kotlin
+@Composable
+fun CounterItem(
+    count: Int,
+    onClick: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("当前：$count")
+        Button(onClick = onClick) {
+            Text("点击")
+        }
+    }
+}
+```
+Flutter = StatelessWidget
+```dart
+class CounterItem extends StatelessWidget {
+  // final变量
+  final int count;
+  final VoidCallback onClick;
+
+  const CounterItem({
+    super.key,
+    required this.count,
+    required this.onClick,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text("当前：$count"),
+        ElevatedButton(
+          onPressed: onClick,
+          child: const Text("点击"),
+        ),
+      ],
+    );
+  }
+}
+```
+
+##### 自定义列表项 Item
 
 ```dart
 // contact_message_item.dart — 消息 Tab 会话行
