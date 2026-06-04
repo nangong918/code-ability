@@ -24,11 +24,50 @@
 
 ## 工作/实习经历
 
-### 2025.11 - 2026.07  卡莱特云科技股份有限公司  Android开发/嵌入式开发
+### 2025.11 - 2026.07  卡莱特云科技股份有限公司  Android开发/Java开发（嵌入式方向）
 
-负责基于RK嵌入式Android平台的多款核心控制类App开发，涵盖嵌入式上位机、云端控制、跨平台应用等方向，同时参与Android Framework定制、音视频编解码、分布式集群通信等核心技术落地，支撑硬件设备智能化管控与云端协同能力构建，具备嵌入式、移动端、云端全链路开发落地经验。
+负责基于RK嵌入式Android平台的多款核心控制类App开发，涵盖嵌入式上位机、云端控制、跨平台应用等方向，
+同时参与Android Framework定制、音视频编解码、分布式集群通信等核心技术落地，
+支撑硬件设备智能化管控与云端协同能力构建，具备嵌入式、移动端、云端全链路开发落地经验。
 
-#### 一、CA前面板控制App
+#### 一、IJetty嵌入式上位机服务端
+
+**技术栈**：JNI/NDK、C++、WebSocket、AIDL跨进程通信、RK芯片V协议
+
+**工作内容**：
+
+维护RK嵌入式上位机的服务端；开发跟Uber上云App跨进程通信的AIDL接口。
+
+1. 依托**iJetty**搭建嵌入式端 HTTP 服务，接收 Web 前端下发的 JSON 控制指令；通过**JNI/NDK**层进行数据编解码，将结构化 JSON 数据转换为 RK 芯片定制V 协议**二进制字节帧**，完成硬件指令下发。
+2. 对接 RK 底层硬件通讯接口，监听芯片主动上报的 V 协议数据帧，经由**JNI/NDK**层逆向解析后，通过**iJetty**内置WebSocket长连接，双向实时推送至前端。
+3. 基于**AIDL**实现跨进程**IPC**通讯，完成与云端控制端 UberApp 的数据交互，构建云端远程操控链路。实现云端→Uber 跨进程→iJetty 上位机→RK 硬件的多级远程控制闭环，支撑设备远程调度与实时状态回传。
+
+**工作成果**：
+
+1. 解决高负载探卡 OOM 与 GC 卡顿问题：采用Java、JNI层分块碎片流式传输方案，支撑 4W + 接收卡批量查询，保障高并发场景稳定运行。
+2. 设计并实现与 Uber 上云 APK 的 AIDL 跨进程通信接口，打通云端→上位机→硬件全链路控制，实现远程操控。
+3. 适配 RK3588 新芯片平台，针对与 RK3399 挂载目录差异，重构镜像升级脚本，完成新产品线兼容落地。
+4. 实现多用户并发操作能力，为指令添加用户隔离机制，支持操作权限区分与多端状态同步。
+5. 优化 Dante 音频板卡超大场景存储：针对双网口的 128 通道预置场景超 V 协议帧限制问题，将配置迁移至服务端 SQLite 持久化存储，解决传输与存储瓶颈。
+6. 完成系统高负载、高可用压测验证，设计耗时任务进度实时上报机制 + 超时 ID 池，大幅提升系统大数据承载能力与稳定性。
+
+#### 二、Cross集群管理App
+
+**技术栈**：RK嵌入式Android、UDP广播、集群通信、双机热备、Java/Kotlin
+
+**核心职责与成果**：
+
+维护Cross双机备份和多机协同功能，并开发分布式集群功能。
+
+1. 重构设备间Discovery发现，在嵌入式弱网将报文冗余的mDNS协议改为UDP组播的自定义轻量级协议，解决高负载卡死问题，兼容高负载测试。
+2. 维护双机热备：主备设备实时同步配置，主机故障掉线后备机自动无缝接管服务。
+- 基于RK嵌入式Android平台研发Cross集群管理App，通过UDP组播实现局域网内设备自动发现、节点上下线状态实时感知，完成动态集群组网，支撑多设备协同管控场景落地。
+
+- 独立设计并实现双机热备容错机制，搭建主备设备配置实时同步通道，实现主机故障、掉线后备用设备自动无缝接管业务服务，将集群整体服务可用性提升至99.9%。
+
+- 开发集群协同控制核心逻辑，实现主机统一管控集群所有节点设备，备机实时同步主机操作指令与设备运行状态，保障集群内全部设备运行行为高度一致，提升集群稳定性。
+
+#### 三、CA前面板控制App
 
 **技术栈**：Android Framework、Kotlin/Java、OpenGL、FFmpeg、RK芯片V协议、AMS/PMS/WMS定制开发
 
@@ -40,33 +79,9 @@
 
 - 集成FFmpeg框架实现视频源解码与播放，针对RK芯片原生MediaPlayer无法兼容YUV422/YUV444特殊格式的痛点问题，自研OpenGL自定义渲染模块，完成视频帧手动绘制，彻底解决特殊格式视频播放兼容性难题。
 
-#### 二、Cross集群管理App
-
-**技术栈**：RK嵌入式Android、UDP广播、集群通信、双机热备、Java/Kotlin
-
-**核心职责与成果**：
-
-- 基于RK嵌入式Android平台研发Cross集群管理App，通过UDP广播协议实现局域网内设备自动发现、节点上下线状态实时感知，完成动态集群组网，支撑多设备协同管控场景落地。
-
-- 独立设计并实现双机热备容错机制，搭建主备设备配置实时同步通道，实现主机故障、掉线后备用设备自动无缝接管业务服务，将集群整体服务可用性提升至99.9%。
-
-- 开发集群协同控制核心逻辑，实现主机统一管控集群所有节点设备，备机实时同步主机操作指令与设备运行状态，保障集群内全部设备运行行为高度一致，提升集群稳定性。
-
-#### 三、IJetty嵌入式HTTP服务端
-
-**技术栈**：iJetty、JNI/Native、WebSocket、AIDL、RK芯片V协议、跨进程通信
-
-**核心职责与成果**：
-
-- 基于iJetty框架搭建嵌入式HTTP服务端，接收Web前端下发的JSON格式控制指令，通过JNI/Native层完成数据编解码转换，将结构化JSON数据转为RK芯片定制V协议二进制字节帧，实现硬件指令精准下发与执行。
-
-- 对接RK底层硬件通讯接口，实时监听芯片主动上报的V协议数据帧，在Native层完成数据逆向解析后，通过WebSocket长连接将硬件状态实时双向推送至前端，实现设备状态可视化回传。
-
-- 基于AIDL实现跨进程IPC通信，打通与UberApp的云端控制链路，构建「云端→Uber跨进程→iJetty上位机→RK硬件」的多级远程控制闭环，支撑设备远程调度、参数配置与状态实时同步。
-
 #### 四、云上MAC地址烧录管理平台
 
-**技术栈**：SpringBoot、Docker、云端设备联动、MAC地址管理
+**技术栈**：SpringBoot、Docker
 
 **核心职责与成果**：
 
@@ -76,7 +91,7 @@
 
 #### 五、麒麟上位机控制App（Flutter）
 
-**技术栈**：Flutter、FFmpeg_kit_flutter、Media3 ExoPlayer、RTSP/RTMP、X264、科大讯飞语音SDK、LLM大模型、VL视觉大模型
+**技术栈**：Flutter、FFmpeg_kit_flutter、Media3 ExoPlayer、RTSP/RTMP、X264、科大讯飞语音SDK、LLM大模型、VL视觉大模型、MVI设计模式
 
 **核心职责与成果**：
 
@@ -90,7 +105,7 @@
 
 #### 六、Uber云端控制App
 
-**技术栈**：RK嵌入式Android、SpringBoot、AIDL、云端通信、MAC地址映射
+**技术栈**：RK嵌入式Android、SpringBoot、AIDL、云端通信（MQTT）
 
 **核心职责与成果**：
 
@@ -132,7 +147,7 @@
 
 #### 三、现金贷SpringBoot后端服务
 
-**技术栈**：SpringBoot、SpringCloudGateway、PostgreSQL、TimescaleDB、MyBatis、Redis、Redisson、Kafka、Nginx、JWT、AOP、OSS、Swagger
+**技术栈**：SpringBoot、SpringCloudGateway、MySQL、TimescaleDB、MyBatis、Redis、Redisson、Kafka、Nginx、JWT、AOP、OSS、Swagger
 
 **核心职责与成果**：
 
@@ -160,7 +175,7 @@
 
 **项目地址**：https://github.com/nangong918/SmartMedicine-App
 
-**技术栈**：SpringCloud、Dubbo、SpringAI、Neo4j、ElasticSearch、Kafka、RabbitMQ、Minio、PostgreSQL、Redis、Redisson、Nginx、AOP
+**技术栈**：SpringCloud、Dubbo、SpringAI、Neo4j、ElasticSearch、Kafka、RabbitMQ、Minio、MySQL、Redis、Redisson、Nginx、AOP
 
 **项目简介**：本项目为基于微服务架构搭建的一站式智能医疗服务平台，集成AI智能问诊、在线智能挂号、医疗文章个性化推荐、智能语义搜索、疾病风险预测、医疗社区互动等核心功能。深度融合NLP自然语言处理、知识图谱与多算法推荐模型，实现传统医疗服务智能化升级，落地轻量化、便捷化的智能医疗服务场景。
 
@@ -204,7 +219,7 @@
 
 - **AI与语音技术**：熟悉科大讯飞语音SDK，可实现语音唤醒、VAD检测、STT/TTS语音转换等功能；具备LLM大模型、VL视觉大模型集成与场景落地能力。
 
-- **开发工具与基础**：熟练使用Git版本控制、Maven/Gradle项目构建工具；具备扎实的机器学习、NLP自然语言处理、推荐系统算法基础。
+- **开发工具与基础**：熟练使用Git版本控制、Maven/Gradle项目构建工具；Cursor、Trae等AI开发工具
 
 - **综合能力**：具备嵌入式+云端、移动端+后端、软件+硬件的全链路开发能力，擅长复杂场景下的性能优化、跨进程通信、跨设备集群协同、高并发系统优化，能够独立承接全流程项目研发工作。
 
