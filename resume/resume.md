@@ -24,7 +24,7 @@
 
 ## 大致技能
 
-Android（JNI、RK嵌入式）；Flutter跨平台；SpringBoot、Docker等后端开发；FFmpeg、OpenGL、RTMP、RTSP、软硬编解码（MMP、MediaCoder、X264）、WebRTC；前后端AI（SpringAI，科大讯飞系列AI接口SDK）；Cursor等AI开发工具
+Android（JNI、RK嵌入式）；Flutter跨平台；GooglePlay上架App经验；SpringBoot、Docker等后端开发；FFmpeg、OpenGL、RTMP、RTSP、软硬编解码（MMP、MediaCoder、X264）、WebRTC；前后端AI（SpringAI，科大讯飞系列AI接口SDK）；Cursor等AI开发工具
 
 ## 工作经历
 
