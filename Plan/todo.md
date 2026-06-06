@@ -41,9 +41,43 @@
 
 
 
+## 因为面试，原有的计划打乱
 
+### 业务
+- 根据简历模拟面试，逐层深入，落实各个技术与技能
+- 整理面试问题文档
 
+### 技术
+- Java、Kotlin、C++
+- AndroidFramework
+- UI：Flutter（Dart）、Jetpack Compose
+- RK相关业务
+- 流媒体相关业务
+- SpringBoot Framework
 
+### 理论
+- 数据结构与算法
+- 计算机网络
+- 操作系统
+- 计算机组成原理
+- 数据库
+- 软件开发（面向对象，设计模式，UML，软件工程）
+- 编译原理
+
+### 执行顺序
+1. 模拟面试
+2. 梳理面试问题文档并链接各个文档
+3. Java、Kotlin携程、C++（前3章） + JNI
+4. Android Framework
+5. 数据结构与算法
+6. UI：Flutter（Dart）、Jetpack Compose
+7. 操作系统（RK芯片Android系统，线程进程文件、Linux）
+8. 计算机网络（408、音视频流媒体）
+9. 计算机组成原理（408、音视频编解码）
+10. 软件开发（面向对象，设计模式，UML，软件工程）
+11. 数据库（MySQL，SQLite）
+12. 软件开发（面向对象，设计模式，UML，软件工程）
+13. 编译原理（CMake，Android.md，AOSP，RK）
 
 
 
