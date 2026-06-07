@@ -54,7 +54,7 @@
 
 ## RegisterNatives
 
-```text
+```c++
 JNI_OnLoad(JavaVM* vm, void* reserved) {
     JNIEnv* env;
     vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
