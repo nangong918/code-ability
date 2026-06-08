@@ -365,9 +365,168 @@ class VoiceAssistant {
 
 #### Android设计模式
 
-##### 1. MVC，MVP
+* Model: 实体类、网络、数据库、业务逻辑
+* View: 布局 XML、控件（Button/TextView 等）
+* Controller: Activity / Fragment
+* Presenter（主持人 / 逻辑代理人）
+* ViewModel（数据状态代理人）
+* Intent（意图 / 用户操作）
 
-##### 2. MVVM
+##### 1. MVC
 
-##### 3. MVI
+Activity 身兼两职：Controller + 间接持有 View
+View 和 Controller 高度耦合（都在 Activity）
 
+```mermaid
+graph LR
+    View[View<br/>Activity/Layout] -->|用户事件| Controller[Controller<br/>Activity]
+    Controller -->|操作数据| Model[Model<br/>数据/业务]
+    Model -->|数据更新| Controller
+    Controller -->|更新UI| View
+```
+
+##### 2. MVP
+
+```mermaid
+graph LR
+    View[View<br/>Activity/Fragment] -->|用户事件| Presenter[Presenter]
+    Presenter -->|调用逻辑| Model[Model]
+    Model -->|返回数据| Presenter
+    Presenter -->|通知更新| View
+    
+    View -.不直接访问.- Model
+```
+
+* 所有逻辑在 Presenter;
+* 通过接口回调更新 UI
+
+##### 3. MVVM
+
+```mermaid
+graph LR
+    View[View<br/>Activity/Fragment] -->|用户事件| ViewModel[ViewModel]
+    ViewModel -->|业务/数据| Model[Model]
+    Model -->|数据返回| ViewModel
+    ViewModel -->|数据驱动<br/>LiveData/StateFlow| View
+    
+    View -.无引用.- ViewModel
+```
+
+* 双向 / 单向数据绑定
+* View 不持有 ViewModel 引用
+* 生命周期安全，可复用
+
+##### 4. MVI
+
+```mermaid
+graph TD
+    View[View] -->|Intent 用户操作| ViewModel
+    ViewModel -->|Action| Reducer
+    Reducer -->|生成新 State| State
+    State -->|自动刷新| View
+    ViewModel -->|Effect 一次性事件| View
+```
+
+单向数据流 + 唯一状态
+
+##### 比对 MVVM 和 MVI 的双向数据流和单项数据流
+
+|对比项| MVVM（双向）               | MVI（单向）                      |
+|--|------------------------|------------------------------|
+|数据流| View ↔ VM 双向调用、网状      | 	View→Intent→State→View 单向闭环 |
+|状态| 分散多 LiveData/Flow，易不同步 | 单一不可变 UiState，原子更新           |
+
+eg：用户名输入框 + 实时校验
+* 输入文字
+* 实时判断长度是否合法
+* 合法 → 按钮可点击
+* 不合法 → 按钮不可点击 + 显示错误
+
+MVVM 多状态分散
+```kotlin
+// MVVM ViewModel（多状态分散）
+class LoginViewModel : ViewModel() {
+    // 分散的 N 个状态
+    val username = MutableLiveData<String>()
+    val isButtonEnable = MutableLiveData<Boolean>()
+    val errorMsg = MutableLiveData<String?>()
+
+    // 输入变化
+    fun onUsernameChanged(text: String) {
+        username.value = text
+
+        // 这里修改另一个状态
+        if (text.length > 3) {
+            isButtonEnable.value = true
+            errorMsg.value = null
+        } else {
+            isButtonEnable.value = false
+            errorMsg.value = "用户名太短"
+        }
+    }
+}
+
+// View（Activity）
+etUsername.doAfterTextChanged { text ->
+    vm.onUsernameChanged(text.toString()) // 调用 VM
+}
+
+// 观察 N 个数据源
+vm.username.observe(this) {  }
+vm.isButtonEnable.observe(this) {  }
+vm.errorMsg.observe(this) {  }
+```
+
+
+
+MVI 唯一状态 UiState
+```kotlin
+// 唯一状态 UiState
+data class LoginState(
+    val username: String = "",
+    val isButtonEnable: Boolean = false,
+    val errorMsg: String? = null
+)
+
+// 输入动作 = Intent
+sealed class LoginIntent {
+    data class InputUsername(val text: String) : LoginIntent()
+}
+
+// ViewModel（只有一个入口、一个状态）
+class LoginViewModel : ViewModel() {
+    private val _state = MutableStateFlow(LoginState())
+    val state: StateFlow<LoginState> = _state.asStateFlow()
+
+    // 唯一入口！
+    fun dispatch(intent: LoginIntent) {
+        when (intent) {
+            is LoginIntent.InputUsername -> {
+                val text = intent.text
+                val enable = text.length > 3
+                val error = if (enable) null else "太短"
+
+                // 只做一件事：生成新状态
+                _state.update {
+                    it.copy(
+                        username = text,
+                        isButtonEnable = enable,
+                        errorMsg = error
+                    )
+                }
+            }
+        }
+    }
+}
+
+// View（只观察一个状态）
+etUsername.doAfterTextChanged { text ->
+    vm.dispatch(LoginIntent.InputUsername(text.toString()))
+}
+
+// 只订阅一个东西
+vm.state.collect { state ->
+    btnLogin.isEnabled = state.isButtonEnable
+    tvError.text = state.errorMsg
+}
+```
