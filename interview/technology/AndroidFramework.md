@@ -442,91 +442,166 @@ eg：用户名输入框 + 实时校验
 * 合法 → 按钮可点击
 * 不合法 → 按钮不可点击 + 显示错误
 
-MVVM 多状态分散
-```kotlin
-// MVVM ViewModel（多状态分散）
-class LoginViewModel : ViewModel() {
-    // 分散的 N 个状态
-    val username = MutableLiveData<String>()
-    val isButtonEnable = MutableLiveData<Boolean>()
-    val errorMsg = MutableLiveData<String?>()
+MVVM
 
-    // 输入变化
-    fun onUsernameChanged(text: String) {
-        username.value = text
+流转链路（原生 View + DataBinding + LiveData）
+```text
+网络回显
+接口拿到数据 → 更新 LiveData → 双向绑定触发输入框 UI 刷新 ✅ 正常
 
-        // 这里修改另一个状态
-        if (text.length > 3) {
-            isButtonEnable.value = true
-            errorMsg.value = null
-        } else {
-            isButtonEnable.value = false
-            errorMsg.value = "用户名太短"
-        }
-    }
-}
+用户手动输入
+用户打字 → 输入框内容变化 → 双向绑定反向把值写回 LiveData
+  → LiveData 再次变更 → 又触发输入框刷新
+  → 无限循环 ⚠️
+```
 
-// View（Activity）
-etUsername.doAfterTextChanged { text ->
-    vm.onUsernameChanged(text.toString()) // 调用 VM
-}
+MVI
 
-// 观察 N 个数据源
-vm.username.observe(this) {  }
-vm.isButtonEnable.observe(this) {  }
-vm.errorMsg.observe(this) {  }
+```text
+网络加载
+网络数据 → 更新 State 字段 → Compose 输入框读取 State 渲染
+
+用户输入
+输入框文本变化 → 发送 InputTextChanged Intent 到 ViewModel
+  → ViewModel 接收后按需更新 State（可加防抖、校验、业务逻辑）
+  → 新 State 再驱动 UI 刷新
 ```
 
 
+##### MVI + Compose
 
-MVI 唯一状态 UiState
+Jetpack Compose天生适配MVI
+
+MVI首先创建三个：
+* UiState：页面唯一状态，UI 只渲染 State
+* UiIntent：用户 / 系统行为意图，所有交互统一发 Intent
+* UiEvent：一次性事件（Toast、弹窗、页面跳转，防页面重建重复触发）
+
 ```kotlin
-// 唯一状态 UiState
-data class LoginState(
-    val username: String = "",
-    val isButtonEnable: Boolean = false,
-    val errorMsg: String? = null
+/** 页面行为意图 */
+sealed class InputUiIntent {
+    // 用户输入文本
+    data class TextInputChanged(val text: String) : InputUiIntent()
+    // 触发网络加载数据
+    object LoadNetData : InputUiIntent()
+}
+
+/** 页面 UI 状态 */
+data class InputUiState(
+  val inputText: String = "",    // 输入框文本
+  val isLoading: Boolean = false// 加载中状态
 )
 
-// 输入动作 = Intent
-sealed class LoginIntent {
-    data class InputUsername(val text: String) : LoginIntent()
+/** 一次性事件（不进UI状态） */
+sealed class InputUiEvent {
+  data class ShowToast(val msg: String) : InputUiEvent()
 }
 
-// ViewModel（只有一个入口、一个状态）
-class LoginViewModel : ViewModel() {
-    private val _state = MutableStateFlow(LoginState())
-    val state: StateFlow<LoginState> = _state.asStateFlow()
+/** ViewModel 层（业务逻辑、状态流转核心） */
+class InputMviViewModel : ViewModel() {
 
-    // 唯一入口！
-    fun dispatch(intent: LoginIntent) {
-        when (intent) {
-            is LoginIntent.InputUsername -> {
-                val text = intent.text
-                val enable = text.length > 3
-                val error = if (enable) null else "太短"
+  // 页面状态：只读对外暴露
+  private val _uiState = MutableStateFlow(InputUiState())
+  val uiState: StateFlow<InputUiState> = _uiState.asStateFlow()
 
-                // 只做一件事：生成新状态
-                _state.update {
-                    it.copy(
-                        username = text,
-                        isButtonEnable = enable,
-                        errorMsg = error
-                    )
-                }
-            }
-        }
+  // 一次性事件流
+  private val _uiEvent = MutableSharedFlow<InputUiEvent>()
+  val uiEvent: SharedFlow<InputUiEvent> = _uiEvent
+
+  /** 接收外部传来的 Intent */
+  fun sendIntent(intent: InputUiIntent) {
+    when (intent) {
+      is InputUiIntent.TextInputChanged -> handleTextChanged(intent.text)
+      InputUiIntent.LoadNetData -> handleLoadNetData()
     }
+  }
+
+  // 处理用户输入
+  private fun handleTextChanged(newText: String) {
+    // 直接更新状态，Compose 自动刷新，无双向循环
+    _uiState.update { it.copy(inputText = newText) }
+  }
+
+  // 模拟网络请求加载数据
+  private fun handleLoadNetData() {
+    viewModelScope.launch {
+      _uiState.update { it.copy(isLoading = true) }
+
+      // 模拟网络耗时
+      delay(1500)
+      val netText = "来自网络的默认文本"
+
+      // 网络数据回填状态
+      _uiState.update {
+        it.copy(
+          inputText = netText,
+          isLoading = false
+        )
+      }
+
+      // 发送一次性 Toast 事件
+      _uiEvent.emit(InputUiEvent.ShowToast("网络数据加载完成"))
+    }
+  }
 }
 
-// View（只观察一个状态）
-etUsername.doAfterTextChanged { text ->
-    vm.dispatch(LoginIntent.InputUsername(text.toString()))
-}
+/** View 层（页面 UI 渲染） */
+@Composable
+fun InputMviPage(
+  viewModel: InputMviViewModel = viewModel()
+) {
+  val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+  val context = LocalContext.current
 
-// 只订阅一个东西
-vm.state.collect { state ->
-    btnLogin.isEnabled = state.isButtonEnable
-    tvError.text = state.errorMsg
+  // 监听一次性 Event
+  LaunchedEffect(Unit) {
+    viewModel.uiEvent.collectLatest { event ->
+      when (event) {
+        is InputUiEvent.ShowToast -> {
+          android.widget.Toast.makeText(context, event.msg, android.widget.Toast.LENGTH_SHORT).show()
+        }
+      }
+    }
+  }
+
+  Column(modifier = Modifier.padding(20.dp)) {
+    // 加载中动画
+    if (uiState.isLoading) {
+      CircularProgressIndicator()
+    }
+
+    // 输入框：标准 Compose 写法
+    OutlinedTextField(
+      value = uiState.inputText,       // 只读取全局 State
+      onValueChange = { newText ->
+        // 只分发 Intent，绝不直接改数据
+        viewModel.sendIntent(InputUiIntent.TextInputChanged(newText))
+      },
+      label = { Text("MVI 输入框") }
+    )
+
+    Button(
+      onClick = { viewModel.sendIntent(InputUiIntent.LoadNetData) },
+      modifier = Modifier.padding(top = 10.dp)
+    ) {
+      Text("加载网络数据")
+    }
+  }
 }
 ```
+
+
+**MVI模式的JetpackCompose相关问题**
+
+* State，Intent，Event的职责分别是什么？
+  * State是View的状态控制，是View的唯数据来源，对应着MVI设计模式中的单一数流向。
+  * Intent是用户 / 系统产生的行为意图，可以解耦View和用户操作事件的。
+  * Event是一次性副作用，如 Toast、弹窗、页面跳转，仅执行一次，不常驻 UI 状态。
+* MutableStateFlow，MutableSharedFlow，StateFlow，SharedFlow分别是什么？为社么UI用StateFlow，Event用SharedFlow？
+  * Mutable是可写的意思，没有则是不可写只可读
+  * 对外暴露的是不可写的，印证了MVI的单向数据流，即 `intent -> Reducer -> state -> view`
+  * State回保留状态，而Shared不保留、无记录。印证了一次性副作用流的`一次性`特点。
+  * 内部更新可以用`_uiState.update`更新数据
+  * 一次性副作用流可以在page中用`LaunchedEffect`监听
+* 为什么Page中的`uiState`是用的`viewModel.uiState.collectAsStateWithLifecycle()`而不是直接从`viewModel`获取`uiState`
+  * `collectAsStateWithLifecycle` 是把 `Flow` 流转的数据，转换成 `Compose` 可感知的 UI 状态，同时绑定页面生命周期；如果直接拿 `viewModel.uiState`，只是拿到原始 Flow 对象，Compose 无法自动监听、刷新界面，也不会感知页面启停
