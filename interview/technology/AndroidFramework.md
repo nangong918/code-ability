@@ -605,3 +605,323 @@ fun InputMviPage(
   * 一次性副作用流可以在page中用`LaunchedEffect`监听
 * 为什么Page中的`uiState`是用的`viewModel.uiState.collectAsStateWithLifecycle()`而不是直接从`viewModel`获取`uiState`
   * `collectAsStateWithLifecycle` 是把 `Flow` 流转的数据，转换成 `Compose` 可感知的 UI 状态，同时绑定页面生命周期；如果直接拿 `viewModel.uiState`，只是拿到原始 Flow 对象，Compose 无法自动监听、刷新界面，也不会感知页面启停
+
+
+## 组件内核
+
+### 讲一下Jetpack Compose中的单 Activity + Navigation 切换 Composable架构
+
+* 首先全局唯一一个activity，没有必要使用任何intent跳转；与之对应的，页面跳转使用的是`NavHost + NavController`
+* 页面跳转采用的是`navController.navigate`
+```kotlin
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            // 根层级声明 NavController，旋转屏幕不重置栈
+            val navController = rememberNavController()
+
+            // 导航容器：定义所有页面路由
+            NavHost(
+                navController = navController,
+                startDestination = "page_home" // 初始默认页面
+            ) {
+                // 注册页面 & 对应路由
+                composable(route = "page_home") {
+                    HomePage(navController)
+                }
+                composable(route = "page_detail") {
+                    DetailPage(navController)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun HomePage(navController: NavController) {
+  Column(
+    modifier = Modifier.fillMaxSize(),
+    verticalArrangement = Arrangement.Center,
+    horizontalAlignment = Alignment.CenterHorizontally
+  ) {
+    Text(text = "首页")
+
+    Button(
+      onClick = {
+        // 👉 页面跳转核心代码：跳转到详情页
+        navController.navigate("page_detail")
+      }
+    ) {
+      Text("前往详情页")
+    }
+  }
+}
+```
+
+### Activity的生命周期？Fragment是什么？和Activity的联系？生命周期如何？讲讲在Compose和flutter中的Fragment变为了什么？
+
+* Activity 生命周期
+```text
+完整主线流程
+onCreate() → onStart() → onResume()（前台可交互）
+页面压后台
+onResume() → onPause() → onStop()
+页面重回前台
+onStop() → onStart() → onResume()
+页面销毁
+onPause() → onStop() → onDestroy()
+```
+
+* 屏幕旋转的Activity生命周期更变
+```text
+onPause → onStop → onDestroy → onCreate → onStart → onResume，Activity 实例重建。
+onSaveInstanceState：配置变更前调用，可临时保存轻量数据。
+```
+
+* Fragment 是什么 & 与 Activity 的关系
+  * Fragment 是依附于 Activity 的模块化 UI 组件，拥有独立布局、逻辑与生命周期，用来拆分页面、复用 UI、实现多区块切换，不能独立存在。
+  * 在Jetpack Compose中已经无意义
+
+* Fragment 生命周期
+```text
+onAttach() → onCreate() → onCreateView() → onViewCreated() → onStart() → onResume()
+→ onPause() → onStop() → onDestroyView() → onDestroy() → onDetach()
+```
+
+* Compose / Flutter 中 Fragment 被替代成了什么？
+  * Compose直接抛弃Fragment，直接使用Composable组合函数
+  * Flutter也是直接使用Widget
+
+
+### Activity的4大启动模式有哪些？singleTask 和 singleInstance 有何区別？在NavHost或者flutter的页面管理还需要关心这些吗？为什么？
+
+```text
+standard（标准模式，默认）
+    规则：每次启动都新建实例，无论当前栈内是否存在该 Activity。
+    入栈：新实例压入当前任务栈栈顶。
+singleTop（栈顶唯一）
+    仅判断栈顶
+    目标 Activity 已经在栈顶 → 复用当前实例，回调 onNewIntent()，不新建
+singleTask（栈内唯一）
+    启动时先在当前任务栈查找已有实例；
+    找到：把该 Activity 之上所有页面全部出栈销毁，让它来到栈顶，回调 onNewIntent()；
+singleInstance（全局独立任务栈）
+    系统专门开辟全新独立任务栈，该 Activity 是栈中唯一元素；
+    全局只存在一个实例；
+```
+
+### Activity如何保存状态的？ViewModel吗？有什么用？为什么Activity旋转屏幕后ViewModel可以恢复数据？ViewModel 的实例缓存到哪儿了？
+
+* Activity 保存状态的几种方式
+  * onSaveInstanceState / onRestoreInstanceState
+  ```kotlin
+  override fun onSaveInstanceState(outState: Bundle) {
+    super.onSaveInstanceState(outState)
+    outState.putString("key_text", "临时数据")
+  }
+  
+  override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+    val data = savedInstanceState?.getString("key_text")
+  }
+  ```
+  * ViewModel
+  * 持久化方案（SP / 数据库 / 文件）
+
+* 为什么屏幕旋转后 ViewModel 还能保留数据？
+  * Activity 销毁重建 ≠ ViewModel 销毁，二者生命周期不一致。
+
+* ViewModel 实例缓存在哪里？
+  * ViewModel 实例被缓存在 ViewModelStore 中
+  * 每一个 ViewModelStoreOwner（Activity / Fragment / NavBackStackEntry）都会持有一个独立 ViewModelStore；
+  * ViewModelStore 内部是一个 HashMap<String, ViewModel>，以 Class 为 Key 缓存实例。
+
+### Service的生命周期是什么样的？你会在什么情况下使用Service？Service和Thread的区别？IntentService与Service的区别？Jetpack Compose中的Worker是怎样的？
+
+* Service 两种启动方式 & 完整生命周期
+
+Android Service 分启动方式和绑定方式，生命周期完全不同，且运行在主线程。
+
+1. startService（启动服务，独立运行）
+
+   * onCreate：服务首次创建时调用，只执行一次，做全局初始化。
+   * onStartCommand：每次调用 startService 都会触发，接收 Intent、执行业务逻辑。
+   * onDestroy：服务停止时调用，释放资源。
+   * 特点：服务启动后独立于调用方，即使页面退出，服务仍可继续运行；需主动调用 stopSelf() / stopService() 停止。
+    
+2. bindService（绑定服务，依附组件）
+
+   * onCreate() → onBind() → 通信中 → onUnbind() → onDestroy()
+   * onBind：返回 IBinder 通信接口，实现客户端与服务交互。
+   * 绑定关系解除时触发 onUnbind，随后销毁。
+   * 特点：依附绑定的 Activity/Fragment，组件销毁、解绑后服务随之销毁；多用于跨组件通信、调用服务能力。
+
+3. Service 和 Thread 的区别
+
+    Service主线程（默认），不能做耗时操作，做后台任务，不做耗时任务。
+    Thread子线程，天生用于耗时任务
+
+4. IntentService 与 Service 的区别
+   IntentService 是 Service 的子类，Android 已废弃，是早期简化后台串行任务的方案。
+
+5. Jetpack Compose 中的 Worker（WorkManager）
+
+
+```kotlin
+// 定义 Worker
+class MyUploadWorker(context: Context, params: WorkerParameters)
+    : CoroutineWorker(context, params) {
+
+    override suspend fun doWork(): Result {
+        // 后台耗时任务：上传文件、同步数据等
+        return Result.success()
+    }
+}
+// Compose / Activity 中提交任务
+// 构建一次性任务
+val workRequest = OneTimeWorkRequestBuilder<MyUploadWorker>()
+  .setConstraints(
+    Constraints.Builder()
+      .setRequiredNetworkType(NetworkType.CONNECTED)
+      .build()
+  )
+  .build()
+
+// 加入调度队列
+WorkManager.getInstance(context).enqueue(workRequest)
+```
+
+
+### 请介绍Android里广播的分类？程序A能否接收到程序B的广播？请列举广播注册的方式，并简单描述其区别？你是怎么使用广播的？现在有什么可以替代广播吗？
+
+1. 按广播类型划分
+    （1）标准广播（Normal Broadcast）
+    异步执行，无序传播，所有接收器几乎同时收到，无法截断、无法拦截。
+    发送：sendBroadcast(Intent)
+    示例：普通自定义业务广播、部分系统通知。
+  
+    （2）有序广播（Ordered Broadcast）
+    同步执行，按优先级顺序传播，优先级高的接收器先接收。
+    可通过 abortBroadcast() 截断广播，后续接收器不再收到。
+    发送：sendOrderedBroadcast(Intent, 权限字符串)
+    
+    （3）粘性广播（Sticky Broadcast）
+    广播发送后会持久保留，后续新注册的接收器也能补收到这条历史广播。
+    Android 5.0 后基本废弃，系统不再推荐使用，高版本已限制。
+    
+    （4）本地广播（Local Broadcast）
+    仅在当前应用内部传播，跨应用无法接收，安全性高、效率高。
+    由 LocalBroadcastManager 实现，不会走系统全局广播机制。
+
+2. 按来源划分
+   系统广播：系统发出，如开机、网络变化、电量变化、屏幕亮灭、时区变更等。
+   自定义广播：开发者自己定义 Intent Action，应用内 / 跨应用业务通信。
+
+* 现在基本都用EventBus或者StateFlow；只有系统级别消息采用广播，比如监听系统级别的网络变化。
+
+用StateFlow实现全局广播：
+```kotlin
+// 第一步：定义全局消息实体（统一消息格式）
+// 全局广播消息 sealed class（分类不同事件）
+sealed class GlobalEvent {
+  // 事件1：用户退出登录
+  object Logout : GlobalEvent()
+  // 事件2：网络状态变化
+  data class NetworkChange(val isConnected: Boolean) : GlobalEvent()
+  // 事件3：收到新消息
+  data class NewMessage(val content: String) : GlobalEvent()
+}
+
+// 第二步：全局广播管理器（单例 + SharedFlow）
+/**
+ * 全局事件广播管理器（替代 LocalBroadcastManager）
+ * 单例 + SharedFlow 实现应用内全局事件分发
+ */
+object GlobalEventBus {
+  // 可变事件流：内部发送使用
+  private val _eventFlow = MutableSharedFlow<GlobalEvent>(
+    extraBufferCapacity = 10, // 缓冲区大小，处理短时订阅延迟
+    onBufferOverflow = BufferOverflow.DROP_OLDEST // 缓冲区满时丢弃旧消息
+  )
+  // 只读对外暴露：外部只能订阅，不能发送
+  val eventFlow: SharedFlow<GlobalEvent> = _eventFlow.asSharedFlow()
+
+  /**
+   * 发送全局广播事件
+   */
+  fun sendEvent(event: GlobalEvent) {
+    // 非协程环境调用：用 runBlocking 简单包裹（前台主线程场景）
+    runBlocking {
+      _eventFlow.emit(event)
+    }
+  }
+
+  /**
+   * 协程环境内发送（推荐）
+   */
+  suspend fun sendEventSuspend(event: GlobalEvent) {
+    _eventFlow.emit(event)
+  }
+}
+
+// 第三步：发送广播（任意位置调用）
+// 示例1：发送【退出登录】广播
+GlobalEventBus.sendEvent(GlobalEvent.Logout)
+
+// 示例2：发送【网络变化】广播
+GlobalEventBus.sendEvent(GlobalEvent.NetworkChange(isConnected = false))
+
+// 协程内发送（推荐写法）
+lifecycleScope.launch {
+  GlobalEventBus.sendEventSuspend(GlobalEvent.NewMessage("您有一条新通知"))
+}
+
+// 第四步：订阅广播（任意位置调用）
+@Composable
+fun HomePage() {
+  // 收集全局事件流
+  LaunchedEffect(Unit) {
+    GlobalEventBus.eventFlow.collect { event ->
+      when (event) {
+        is GlobalEvent.Logout -> {
+          // 处理退出登录逻辑
+        }
+        is GlobalEvent.NetworkChange -> {
+          // 处理网络变化
+        }
+        else -> {}
+      }
+    }
+  }
+}
+```
+
+### 什么是内容提供者？简单介绍下 ContentProvider 是如何实现数据共享的（原理）？
+基于 Binder 跨进程通信，外部应用通过 ContentResolver + Uri 发起请求，系统根据 Uri 中的唯一标识匹配目标 ContentProvider
+
+### SharedPreference是线程安全的吗？MMKV呢？
+SP非线程安全，MMKV相对安全
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
