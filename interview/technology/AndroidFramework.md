@@ -905,17 +905,191 @@ SP非线程安全，MMKV相对安全
 
 
 
+## Android内核
+
+### Binder是什么？AIDL是什么？有几种AIDL文件？是怎么为IPC跨进程通信服务的？为什么 Android 要采用 Binder 作为 IPC 机制？
+
+* 操作系统中进程通信的机制有：
+  * 管道（Pipe）& 命名管道（FIFO）
+  * 消息队列（Message Queue）：内核维护消息链表，进程按格式收发消息，支持多进程读写、异步通信。
+  * 共享内存（Shared Memory）：直接将同一块物理内存映射到多个进程虚拟地址空间，数据零拷贝，性能理论最优。
+  * 信号、信号量：用于管理临界区域，比如两个进程都想范文打印机。
 
 
+### 操作系统中线程通信的方式有哪些？Handler怎么进行线程通信，原理是什么？ThreadLocal的原理，以及在Looper是如何应用的？Handler如果没有消息处理是阻塞的还是非阻塞的？handler.post(Runnable) runnable是如何执行的？
+
+* 线程通信方式：
+  * 共享内存（全局变量 / 成员变量）：同进程线程共享地址空间，直接读写全局变量、对象成员实现数据传递
+  * 锁机制（同步互斥）
+  * 等待 / 唤醒机制（条件变量 Condition /wait/notify）
+  * 信号 (Signal) / 信号量 (Semaphore)
+  * 管道 / 队列（消息队列）
+
+* Handler 如何实现线程通信
+  对应角色（生产者 - 消费者模型）
+
+  - 生产者线程：任意子线程，调用 `sendMessage() / post()` 发送消息 → 往队列投放任务 / 消息。
+  - 消费者线程：`Looper` 所在线程（通常是主线程），`Looper.loop()` 循环取消息 → 从队列取出任务执行。
+  - 缓冲区：`MessageQueue` 消息队列（单向链表实现）。
+
+* Handler 线程通信原理、ThreadLocal、Looper 应用、post (Runnable) 执行逻辑
+  核心四组件：Handler、Message、MessageQueue、Looper
+  - Message：消息载体，携带数据、标识、Runnable、延迟时间等；
+  - MessageQueue：消息队列，先进先出存储 Message，内部基于单向链表；
+  - Looper：消息轮询器，无限循环从队列取出消息，分发到对应 Handler；
+  - Handler：消息发送 + 消息处理入口，绑定 Looper，负责 sendMessage/post 和 handleMessage。
+
+  线程通信流程（子线程 → 主线程）
+  - 子线程：创建 Message，通过 Handler.sendMessage() 把消息插入主线程的 MessageQueue；
+  - 主线程 Looper.loop() 死循环不断取队列头部消息；
+  - 取出消息后，回调消息绑定的 Handler.dispatchMessage()；
+  - 最终执行 handleMessage() / 对应 Runnable，逻辑在主线程运行。
+
+* ThreadLocal 原理 & 在 Looper 中的应用
+
+ThreadLocal 是 Java 提供的线程本地存储工具，作用：让数据只在当前线程内独享，线程之间互相隔离、互不干扰。
+Looper是基于ThreadLocal实现的。
+
+* Looper.prepare() 与 Looper.loop()
+  * Looper.prepare()
+    作用：为当前线程创建 Looper + 内置 MessageQueue（消息队列）
+  * Looper.loop()
+    作用：开启无限循环，不断从 MessageQueue 取出消息并分发执行；
+    一旦执行，线程就会阻塞常驻，不会主动退出。
+
+* Handler 无消息时：阻塞 / 非阻塞？Handler 无消息时：阻塞 / 非阻塞？
+无新消息时，MessageQueue 会进入阻塞状态，释放 CPU，不轮询
+适用场景：RK启动进度，应该用Handler将启动进度消息放入消息队列，MessageQueue自动轮询，而不是使用Thread.sleep()
+
+* 主线程直接用 Handler，不用手动创建 Looper 的原因：Android 主线程（ActivityThread） 已帮我们提前初始化好 Looper，就是MainLooper
+
+### Handler 内存泄漏原因 & 最佳解决方案
+
+内存泄漏原因：消息内部持有别的变量的强引用，例如Activity等，在生命周期结束finish()销毁时，消息队列里面的消息还未执行，引用无法释放，导致无法GC回收，从而导致内存泄漏。
+
+解决方案：使用静态内部类 + 弱引用（WeakReference）
 
 
+### Handler、Thread、HandlerThread 三者差别
 
+* Thread
 
+普通 Java 子线程，单纯执行异步代码；无线程消息队列、Looper、Handler 能力，执行完即结束。
+单纯异步执行；
 
+```kotlin
+// 普通子线程
+fun testNormalThread() {
+    Thread {
+        // 子线程执行耗时任务
+        println("普通 Thread 执行任务: ${Thread.currentThread().name}")
+        // 任务执行完毕，线程自动结束
+    }.start()
+}
+```
 
+* Handler + 普通子线程（一般没人这么写）
 
+手动 `Looper.prepare()` + `Looper.loop()` 构建带消息循环的线程，可通过 Handler 收发消息。
+跨线程消息 / 任务调度工具；
 
+```kotlin
+fun testThreadWithLooper() {
+    // 1. 开启一个普通子线程
+    val workThread = Thread {
+        // 为当前线程创建 Looper + 消息队列
+        Looper.prepare()
 
+        // 绑定当前线程 Looper 的 Handler（一般没人创建Looper，都是直接获取Looper）
+        val threadHandler = object : Handler(Looper.myLooper()!!) {
+            override fun handleMessage(msg: Message) {
+                // 消息在【子线程】回调
+                println("子线程 Handler 收到消息: ${msg.what}，线程：${Thread.currentThread().name}")
+            }
+        }
+
+        // 主线程发消息给该子线程
+        threadHandler.sendEmptyMessage(1001)
+
+        // 开启消息死循环，线程常驻、阻塞等待消息
+        Looper.loop()
+
+        // loop() 之后代码不会执行（除非 quit 退出 Looper）
+        println("Looper 已退出")
+    }
+    workThread.name = "Custom-Looper-Thread"
+    workThread.start()
+}
+```
+
+* HandlerThread
+
+系统封装好的 带 Looper 的专用消息线程，继承自 Thread：
+ - 内部自动执行 Looper.prepare() 和 Looper.loop()；
+ - 对外提供 getLooper()，可直接创建 Handler 绑定该线程；
+ - 适用于常驻后台、串行处理任务的工作线程（串行队列，避免并发）。
+自带 Looper 的消息型工作线程，开箱即用。
+
+```kotlin
+fun testHandlerThread() {
+    // 1. 创建 HandlerThread（自带 Looper）
+    val handlerThread = HandlerThread("HandlerThread-Worker")
+    handlerThread.start() // 启动线程，内部自动执行 Looper.prepare() + Looper.loop()
+
+    // 2. 用该线程的 Looper 创建 Handler
+    val workHandler = object : Handler(handlerThread.looper) {
+        override fun handleMessage(msg: Message) {
+            // 任务串行在 HandlerThread 中执行
+            println("HandlerThread 处理消息: ${msg.what}，线程：${Thread.currentThread().name}")
+        }
+    }
+
+    // 发送多条任务，串行执行（消息队列）
+    workHandler.sendEmptyMessage(2001)
+    workHandler.sendEmptyMessage(2002)
+    workHandler.sendEmptyMessage(2003)
+
+    // 不用时退出 Looper、终止线程（避免内存泄漏）
+    // handlerThread.quit()
+}
+```
+
+### MessageQueue 阻塞等待，为何不用 Java wait/notify？
+
+* MessageQueue 等待方式
+
+底层依靠 Linux 管道 + epoll 多路监听，通过 nativePollOnce 实现阻塞 / 唤醒，属于内核级阻塞。
+
+* 为什么不用 Java 层 wait()/notify()？
+  1. 需要精准支持延时消息
+     postDelay 要求队列能定时唤醒，Java wait 只能简单阻塞，难以精准控制超时等待；native 层可设置超时时间，完美适配延时消息。
+  2. 跨语言、跨底层调度
+     MessageQueue 大量逻辑在 Native 层（C++）实现，Java 层 wait/notify 无法和 Native 阻塞联动。
+
+### 更新 UI 的方式 & 四者整体关系
+
+* UI更新方式
+  - 主线程直接更新（页面生命周期、点击事件）
+  - Handler + Message / post(Runnable)（跨线程更新 UI 最通用）
+  - View.post() / View.postDelayed()（内部本质也是 Handler）
+  - runOnUiThread()（Activity 封装的主线程切换，底层 Handler）
+  - Coroutine 协程 Dispatchers.Main（Kotlin 推荐，底层依然封装 Handler）
+  - Jetpack Compose 状态驱动更新（State/StateFlow 自动重组）
+
+* Thread、Handler、Looper、MessageQueue 整体关系
+```text
+一个线程 → 最多一个 Looper（ThreadLocal 保证）
+一个 Looper → 对应唯一 MessageQueue
+一个 Looper → 可绑定多个 Handler
+关系链：
+Thread（载体）
+  ↳ 持有 Looper
+  ↳ 持有 MessageQueue（消息仓库）
+  ↳ 多个 Handler（收发消息）共享同一个 Looper/Queue
+```
+
+### 多线程同时向 MessageQueue 发消息，如何保证线程安全？
+MessageQueue 内部通过 Java 同步锁（synchronized） 保证多线程并发安全
 
 
 
