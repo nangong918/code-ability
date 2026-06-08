@@ -1092,9 +1092,25 @@ Thread（载体）
 MessageQueue 内部通过 Java 同步锁（synchronized） 保证多线程并发安全
 
 
+## 性能优化
 
+### ANR 产生原因、排查、sleep 引发 ANR 数量
 
+ANR 触发条件（主线程阻塞超时）
+ANR = Application Not Responding，主线程在规定时间内无法响应 UI 事件、系统回调。
 
+四大场景超时阈值：
+- 按键 / 触摸事件：5s 无响应 → ANR；
+- BroadcastReceiver 前台广播：10s；
+- Service 前台服务：20s；
+- ContentProvider：10s。
+
+常见产生原因
+- 主线程执行耗时操作：网络请求、文件 IO、数据库、大量计算、Thread.sleep()；
+- 主线程死锁、死循环；
+- 视图绘制 / 布局耗时严重（布局层级深、onDraw 耗时）；
+- 跨进程调用阻塞主线程；
+- 内存频繁抖动、GC 耗时过长。
 
 
 
