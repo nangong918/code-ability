@@ -294,9 +294,116 @@ NIO（Non-blocking IO）（非阻塞 IO）：一个线程管理多个连接，�
 `inputStream.read(buffer)`会阻塞，`inChannel.read(buffer)`不会阻塞
 
 
+### Java数据结构
 
+#### ArrayList 和 Array（数组）的区别？
+ArrayList 内部基于动态数组实现，比 Array（静态数组） 使用起来更加灵活
 
+#### 简述ArrayList和LinkedList的区别？ArrayList 插入和删除元素的时间复杂度？LinkedList 插入和删除元素的时间复杂度？
 
+##### 简述ArrayList和LinkedList的区别？
+
+* 底层
+
+ArrayList：动态数组（Object [] 数组）
+LinkedList：双向链表（Node 节点）
+
+* 访问 / 查询速度
+
+ArrayList 快：支持随机访问，通过下标直接定位，O (1)
+LinkedList 慢：必须从头 / 尾遍历查找，O (n)
+
+* 增删效率
+ArrayList 慢：中间增删需要移动元素，内存连续
+LinkedList 快：只要改变节点引用，不用移动数据
+
+* 内存占用
+ArrayList：内存连续，占用少
+LinkedList：每个节点多存 prev 和 next 指针，内存开销更大
+
+##### ArrayList 插入和删除元素的时间复杂度？LinkedList 插入和删除元素的时间复杂度？
+
+* ArrayList
+头部插入：由于需要将所有元素都依次向后移动一个位置，因此时间复杂度是 O(n)。
+尾部插入：当 ArrayList 的容量未达到极限时，往列表末尾插入元素的时间复杂度是 O(1)
+
+* LinkedList
+头部插入/删除：只需要修改头结点的指针即可完成插入/删除操作，因此时间复杂度为 O(1)。
+尾部插入/删除：只需要修改尾结点的指针即可完成插入/删除操作，因此时间复杂度为 O(1)。
+
+#### LinkedList 为什么不能实现 RandomAccess 接口？
+
+RandomAccess 是一个标记接口，用来表明实现该接口的类支持随机访问（即可以通过索引快速访问元素）。
+由于 LinkedList 底层数据结构是链表，内存地址不连续，只能通过指针来定位，不支持随机快速访问，
+所以不能实现 RandomAccess 接口。
+
+#### Java中怎么实现高效排序？Comparable 和 Comparator 的区别？
+
+##### Java中怎么实现高效排序？
+
+用 Collections.sort () / Arrays.sort ()，底层是优化的双轴快速排序（Dual-Pivot QuickSort）+ 归并排序，时间复杂度 O (n log n)，是 Java 官方最优排序。
+
+##### Comparable 和 Comparator 的区别？
+
+Comparable：侵入式，必须修改实体类
+
+```java
+public class User implements Comparable<User> {
+    int age;
+    @Override
+    public int compareTo(User o) {
+        return this.age - o.age; // 按年龄升序
+    }
+}
+```
+
+Comparator（外部比较器）
+```java
+public void sort() {
+  Collections.sort(list, new Comparator<User>() {
+    @Override
+    public int compare(User o1, User o2) {
+      return o1.getName().compareTo(o2.getName());
+    }
+  });
+}
+```
+
+#### Queue 与 Deque 的区别？什么是 BlockingQueue？
+
+Queue 是单端队列，先进先出。
+Deque 是双端队列，两头都能进出，功能包含 Queue。
+BlockingQueue 是阻塞队列，线程安全，满了阻塞写、空了阻塞读，主要用于并发、线程池、消息队列。
+
+#### ArrayBlockingQueue 和 LinkedBlockingQueue 有什么区别？
+
+* 底层结构不同
+  Array：数组
+  Linked：链表
+
+* 容量不同
+  Array：有界（必须指定容量，固定不变）
+  Linked：有界 / 无界（不指定就是 Integer.MAX_VALUE，近似无界）
+
+* 锁机制不同（最重要！）
+  Array：一把锁，入队出队共用同一把锁，并发度低
+  Linked：两把锁，put 锁、take 锁分离，并发度更高
+
+#### HashMap 和 Hashtable 的区别？HashMap 和 HashSet 区别？HashMap 和 TreeMap 区别？HashSet 如何检查重复？
+
+##### HashMap 和 Hashtable 的区别？
+
+##### HashMap 和 HashSet 区别？
+
+##### HashMap 和 TreeMap 区别？
+
+##### HashSet 如何检查重复？
+
+#### 请解释一下HashMap的工作原理。HashMap 的底层实现？数据怎么存入Hash表，数据怎么从Hash表取出？时空复杂度是怎样的？
+
+#### HashMap 的长度为什么是 2 的幂次方
+
+#### HashMap在多线程环境下出现死循环？在Java 7环境下，多线程操作HashMap可能导致CPU 100%，为什么？如何解决？
 
 ## Kotlin
 
@@ -477,4 +584,10 @@ class Test{
     companion object { @JvmStatic val a = 1 }
 }
 ```
+
+### kotlin的`==`和`===`的区别
+
+* `==` 等于 Java 的 `equals ()`：比较内容
+* `===` 等于 Java 的 `==` ：比较对象地址（引用）
+
 
