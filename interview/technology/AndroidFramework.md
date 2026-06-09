@@ -1054,6 +1054,81 @@ fun testHandlerThread() {
 }
 ```
 
+### 说说你用HandlerThread的场景，以及为什么不使用线程池
+
+对于多数据源合并的业务，我采用线程池。数据源分别来自于IO文件，SQLite，WS更新，用户输入，Http分页请求；
+如果有一个阻塞会导致后面的其他数据也卡死。这时候就要使用线程池异步执行操作。
+
+对于临界资源需要用消息队列HandlerThread，首先比如Android主线程的UI更新，其实都是将UI更新的消息挂在主线程的Looper下的MessageQueue中，等待主线程调度。
+我自己以前遇到过WebSocket并发写入导致的IO异常，这时候我就使用HandlerThread，将所有需要写入WS的数据统统先交给HandlerThread，然后WS写入成功之后在进行调度。
+
+代码：
+```kotlin
+class WsSenderManager {
+
+    // 1. 创建 HandlerThread —— 单线程串行执行所有发送任务
+    private val handlerThread = HandlerThread("WsSenderThread").apply {
+        start()
+    }
+
+    // 2. 工作Handler，运行在HandlerThread单线程中
+    private val workerHandler = Handler(handlerThread.looper)
+
+    // 3. WebSocket 实例（临界资源）
+    private var webSocket: WebSocket? = null
+
+    // ==============================
+    // 外部调用：发送消息（异步排队）
+    // ==============================
+    fun sendMessage(msg: String) {
+        // 关键：把发送任务抛到 单线程队列 排队
+        workerHandler.post {
+            // 这里永远只有一个线程在执行
+            // 绝对不会并发写入！
+            webSocket?.send(msg)
+        }
+    }
+
+    // ==============================
+    // 发送二进制（同样排队）
+    // ==============================
+    fun sendBytes(bytes: ByteArray) {
+        workerHandler.post {
+            webSocket?.send(bytes)
+        }
+    }
+
+    // ==============================
+    // 设置 WebSocket
+    // ==============================
+    fun attachWebSocket(ws: WebSocket) {
+        workerHandler.post {
+            this.webSocket = ws
+        }
+    }
+
+    // ==============================
+    // 释放资源（必须）
+    // ==============================
+    fun release() {
+        workerHandler.post {
+            webSocket = null
+        }
+        handlerThread.quitSafely() // 安全退出线程
+    }
+}
+```
+
+```mermaid
+graph TD
+  A[外部线程<br/>任意地方调用 sendMessage] -->|提交消息Runnable| B[Handler<br/>消息入队]
+  B --> C[MessageQueue<br/>队列排队]
+  C --> D["Looper<br/>无限轮询（死循环）"]
+  D -->|取出消息| E[HandlerThread 单线程<br/>串行执行]
+  E --> F["webSocket?.send(msg)<br/>真正发送"]
+```
+
+
 ### MessageQueue 阻塞等待，为何不用 Java wait/notify？
 
 * MessageQueue 等待方式
