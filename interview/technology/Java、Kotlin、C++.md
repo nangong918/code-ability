@@ -585,6 +585,281 @@ graph LR
     Map --> ConcurrentHashMap
 ```
 
+### Java多线程
+
+#### Thread#sleep() 方法和 Object#wait() 方法对比
+
+* Thread.sleep(long ms)：让当前线程主动休眠，暂停执行
+
+* Object.wait() / Object.wait(long timeout)：让持有当前对象锁的线程进入等待池，释放锁
+
+#### 变量可见性有什么用？如何保证变量的可见性？如何禁止指令重排序？
+
+Java 线程有工作内存，主内存是共享内存。
+
+每个线程会把主内存的变量拷贝一份到本地工作内存，线程读写优先操作本地副本；
+
+编译器、CPU 为了优化执行效率，在不改变单线程执行结果的前提下，重新调整代码指令的执行顺序。
+volatile可以禁止重排序。
+
+#### Atomic底层是怎样实现的？Atomic能实现原子性操作吗？
+
+Atomic 类底层就是 volatile + CAS 详解（Compare-And-Swap，比较并交换；是原子操作）
+源码参考：
+```java
+public class AtomicInteger extends Number implements java.io.Serializable {
+    // 存放数值的成员变量，被 volatile 修饰
+    private volatile int value;
+
+    // ... 各种方法
+    public final int get() {
+        return value;
+    }
+
+    public final int getAndIncrement() {
+        return unsafe.getAndAddInt(this, valueOffset, 1);
+    }
+}
+```
+
+存储数据的 value 本身就是 volatile 变量；也就是依托了可见性才实现了原子性。
+
+原子性 vs 可见性
+
+原子性：一组操作「不可分割」，要么全部执行成功，要么失败，不会被其他线程打断；
+可见性：一个线程的修改，其他线程能从主内存读到最新值。
+
+#### 什么是悲观锁？什么是乐观锁？如何实现悲观锁？乐观锁？
+
+* 悲观锁（Pessimistic Lock）：
+  核心假设：默认并发冲突一定会发生，从一开始就上锁，阻止其他线程 / 事务访问共享资源。
+  - 心态：先上锁，再干活，认为别人一定会抢资源；
+  - 特点：独占、阻塞、安全性高，并发性能偏低；
+  - 适用：并发冲突频繁、写操作多的场景。
+
+锁示例：
+`synchronized`
+`java.util.concurrent.locks.ReentrantLock`
+`select ... for update`
+
+* 乐观锁（Optimistic Lock）
+  核心假设：默认并发冲突很少发生，不上锁，先直接尝试修改；操作完成前再校验是否被别人改动过，冲突则重试 / 放弃。
+  - 心态：先干活，出事再处理，认为没人会同时抢资源；
+  - 特点：无阻塞、并发性能高，冲突时会重试；
+  - 适用：读多写少、冲突概率低的场景。
+
+乐观锁示例：
+乐观锁基本无锁，采用的是 CAS，Java 无锁乐观锁核心实现
+
+读取预期值 A + 内存当前值V，只有 `V == A` 才更新为新值，否则判定冲突
+冲突处理：一般自旋重试，直到更新成功；
+AtomicXXX 原子类、ConcurrentHashMap 空桶插入、并发容器大量使用 CAS
+缺陷：存在 ABA 问题
+
+#### ABA问题全称是什么？怎么产生的？怎么解决？看看代码
+
+CAS 的判断逻辑只关心「当前内存值 == 预期值」，不关心中间是否被修改过。
+
+- 线程 1 读取共享变量，初始值为 A；
+- 线程 1 因时间片切换 / 阻塞，暂停执行；
+- 线程 2 介入：把变量从 A → B，再改回 A；
+- 线程 1 恢复执行，执行 CAS：发现内存值还是 A，认为「没人修改过」，正常更新。
+问题本质：变量经历了 `A→B→A` 的完整修改链路，但 CAS 无法感知中间变化，造成逻辑误判。
+
+* 解决方案：AtomicStampedReference（值 + 版本号，推荐）
+
+
+#### 共享锁和独占锁有什么区别？
+独占：synchronized，ReentrantLock
+共享：ReentrantReadWriteLock（读写锁）
+
+
+#### 核心线程数如何配置
+
+* CPU 密集型任务（计算多、IO 少）
+  - 公式：核心线程数 = CPU核心数 + 1
+  - 原因：CPU 尽量打满，+1 应对线程偶尔阻塞。
+
+* IO 密集型任务（数据库、网络、文件读写，等待多）
+  - 公式：核心线程数 = CPU核心数 * 2 或 CPU核心数 / (1 - 阻塞系数)
+  - 阻塞系数一般取 0.8~0.9，IO 等待时间越长，线程数可以设越大
+
+#### 线程队列以及拒绝策略是怎样的？
+
+线程池队列：
+* ArrayBlockingQueue
+  - 数组实现、有界队列，创建时必须指定容量；读写共用一把锁，并发性能中等，业务通用首选。
+* LinkedBlockingQueue
+  - 链表实现，可设为有界 / 无界；无界版本任务会无限积压，严禁在普通业务线程池使用。
+* SynchronousQueue
+  - 不存储任务，插入任务必须等待对应消费线程，相当于 “直传”，适合 CachedThreadPool 类型。
+* DelayQueue
+  - 延迟队列，任务按延迟时间排序，仅用于定时 / 延迟任务。
+
+四种内置拒绝策略：
+当「核心线程已满 + 队列已满 + 最大线程已满」，新任务触发拒绝策略：
+ - AbortPolicy（默认）：直接抛出 RejectedExecutionException 异常。
+ - DiscardPolicy：静默丢弃当前新任务，无日志、无异常。
+ - DiscardOldestPolicy：丢弃队列里等待最久的任务，尝试执行新任务。
+ - CallerRunsPolicy：把任务交给调用者线程执行，起到限流作用，不丢任务。
+
+
+##### 配置线程池
+
+前置：获取 CPU 核心数
+```java
+// 获取当前机器 CPU 核心数
+private static final int CPU_CORE = Runtime.getRuntime().availableProcessors();
+```
+
+* 拒绝场景分析：守护线程检查存活情况
+  * 双机备份、状态轮询、OKHttp 5s 超时、轮询间隔 3s 场景
+  * 若使用 CallerRunsPolicy：
+    * 被拒绝的任务交给调用线程（守护轮询线程） 同步执行 也就是Android的主线程，直接卡死造成ANR
+    * 备机存活状态探测，属于监控巡检类任务，允许少量任务丢失、短暂漏检，不能因为单个探测超时拖垮整个轮询调度
+    * 综上应该使用 DiscardOldestPolicy
+
+* 定时任务：ScheduledThreadPoolExecutor
+
+* 空闲超时：
+  - 线程干完任务后，进入空闲状态；
+  - 如果连续空闲时长 > keepAliveTime，这个非核心线程就会被销毁回收；
+  - 一般最大线程数 > 核心线程数 才配置空闲超时。
+
+###### 守护线程 - 轮询定时查询任务
+
+场景分析
+  - 类型：轮询定时任务，轻量轮询、少量 IO，任务执行快；
+  - 线程要求：守护线程（JVM 退出时线程自动随之退出，不阻塞进程关闭）；
+  - 特点：要丢掉最老的任务 DiscardOldestPolicy；
+  - 线程池类型：普通固定线程池即可。
+
+* 核心线程数：轮询任务偏轻 IO，取 CPU_CORE * 2
+* 线程池：定时任务线程池 ScheduledThreadPoolExecutor
+* 最大线程数：和核心线程一致，固定线程池，避免频繁创建销毁
+* 空闲超时：0L（核心线程默认不回收）
+* 队列容量：轮询任务量可控，队列设 50
+* 队列：ArrayBlockingQueue
+* 线程工厂：守护线程，自定义线程名 poll-query-thread-
+* 拒绝策略：DiscardOldestPolicy（丢弃老的任务）
+
+```java
+import java.util.concurrent.*;
+
+public class ThreadPoolConfig {
+    private static final int CPU_CORE = Runtime.getRuntime().availableProcessors();
+
+    /**
+     * 守护线程：轮询定时查询 线程池
+     */
+    public static ExecutorService createPollQueryPool() {
+        int core = CPU_CORE * 2;
+        int max = core;
+        long keepAlive = 0L;
+        int queueCapacity = 50;
+
+        // 自定义线程工厂：守护线程 + 命名
+        ThreadFactory pollThreadFactory = r -> {
+            Thread t = new Thread(r, "poll-query-thread-" + UUID.randomUUID());
+            t.setDaemon(true); // 设为守护线程
+            return t;
+        };
+
+        return new ScheduledThreadPoolExecutor (
+                core,
+                max,
+                keepAlive,
+                TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(queueCapacity),
+                pollThreadFactory,
+                new ThreadPoolExecutor.DiscardOldestPolicy()
+        );
+    }
+}
+```
+
+
+###### FFmpeg 软解码 - CPU 密集型任务
+
+场景分析
+  - 类型：纯 CPU 密集型，大量计算、几乎无 IO；
+  - 目标：打满 CPU，减少线程上下文切换；
+  - 拒绝策略：解码任务不可随意丢弃，选用 CallerRunsPolicy；
+  - 线程：普通业务线程（非守护，解码任务需要正常执行完成）。
+
+* 核心线程数：CPU_CORE + 1（CPU 密集型标准公式）
+* 最大线程数：同核心线程，不扩容，避免 CPU 争抢
+* 空闲超时：0L
+* 队列容量：解码任务耗时久、并发量可控，队列设 20
+* 队列：ArrayBlockingQueue
+* 线程工厂：普通非守护线程，线程名 ffmpeg-decode-thread-
+* 拒绝策略：CallerRunsPolicy
+
+```java
+/**
+ * FFmpeg 软解码 CPU密集型 线程池
+ */
+public static ExecutorService createFFmpegDecodePool() {
+    int core = CPU_CORE + 1;
+    int max = core;
+    long keepAlive = 0L;
+    int queueCapacity = 20;
+
+    ThreadFactory decodeFactory = r ->
+            new Thread(r, "ffmpeg-decode-thread-" + UUID.randomUUID());
+
+    return new ThreadPoolExecutor(
+            core,
+            max,
+            keepAlive,
+            TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(queueCapacity),
+            decodeFactory,
+            new ThreadPoolExecutor.CallerRunsPolicy()
+    );
+}
+```
+
+###### 网络 IO + 数据库操作 - IO 密集型任务
+
+场景分析
+  - 类型：典型 IO 密集型（网络请求、JDBC 数据库读写），线程大量时间阻塞等待；
+  - 阻塞系数按 0.85 计算，也可简化为 CPU_CORE * 2；
+  - 任务量大、易堆积，队列适当放大；
+  - 拒绝策略：业务请求不丢任务，使用 CallerRunsPolicy；
+  - 非守护线程，保证数据库 / 网络请求正常结束。
+
+```java
+/**
+ * 网络IO + 数据库 IO密集型 线程池
+ */
+public static ExecutorService createIoDbPool() {
+    int core = CPU_CORE * 2;
+    int max = CPU_CORE * 3;
+    long keepAlive = 60L;
+    int queueCapacity = 100;
+
+    ThreadFactory ioDbFactory = r ->
+            new Thread(r, "io-db-thread-" + UUID.randomUUID());
+
+    return new ThreadPoolExecutor(
+            core,
+            max,
+            keepAlive,
+            TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(queueCapacity),
+            ioDbFactory,
+            new ThreadPoolExecutor.CallerRunsPolicy()
+    );
+}
+```
+
+##### 什么情况下才需要多分配一些线程，也就是最大线程不等于核心线程并分配超时时间？IO的时候吗？
+
+任务量波动的时候，比如说CPU密集型的任务就不需要，因为是持续稳定的高输出；
+而IO密集型就需要，比如Http请求，对于服务端，根本不知道用户什么时候会发出大量请求，需要配置一些非核心线程。
+
+
 
 ## Kotlin
 
