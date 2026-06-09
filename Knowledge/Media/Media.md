@@ -46,6 +46,7 @@
     - [HLS相关问题](#hls相关问题)
     - [本项目中的HLS](#本项目中的hls)
   - [播放原理（ExoPlayer 底层）](#播放原理exoplayer-底层)
+  - [FFmpeg 软解码 + OpenGL 渲染（YuvGlAndroidVideoPlayerActivity）](#ffmpeg-软解码--opengl-渲染yuvglandroidvideoplayeractivity)
   - [FFmpeg 在本项目中的集成](#ffmpeg-在本项目中的集成)
   - [项目中 FFmpeg 职能清单（附代码锚点）](#项目中-ffmpeg-职能清单附代码锚点)
   - [FFmpeg 在流媒体中的常见职能（通用）](#ffmpeg-在流媒体中的常见职能通用)
@@ -3465,6 +3466,226 @@ private void initPlayer() {
         playerView.setPlayer(player);
 }
 ```
+
+### FFmpeg 软解码 + OpenGL 渲染（YuvGlAndroidVideoPlayerActivity）
+
+关联入口：`demo/flutter/flutteraar/app/src/main/java/com/example/flutteraar/ui/activity/YuvGlAndroidVideoPlayerActivity.java`
+
+这个 Activity 本身只负责 UI 与生命周期，不直接做解码和渲染。
+
+先明确项目里“两套 OpenGL”的关系：
+
+- **Android OpenGL（Java GLES）**：运行在 Android Framework 层（典型是 `GLSurfaceView + GLES20`），渲染代码主要在 Java/Kotlin。
+- **C++ native OpenGL（EGL/GLES）**：运行在 NDK 层（`ANativeWindow + EGL + GLES2`），渲染代码在 C++。
+
+`YuvGlAndroidVideoPlayerActivity` 当前代码路径实际走的是 **C++ native OpenGL**（通过 `FfmpegYuvPlaybackController -> YuvGlPlayerBridge -> JNI -> yuv_gl_player.cpp`），不是 Java 层 `GLSurfaceView.Renderer` 方案。
+
+---
+
+#### 0) Android 方案 vs C++ 方案（你这个问题的结论）
+
+| 维度 | Android OpenGL（Java GLES） | C++ native OpenGL（当前实际） |
+|------|------------------------------|--------------------------------|
+| 渲染层 | Java/Kotlin（`GLES20`） | C++（`EGL + GLES2`） |
+| 常见载体 | `GLSurfaceView` / `TextureView` | `SurfaceView -> ANativeWindow` |
+| 你提到的 `YuvGlAndroidVideoPlayerActivity` | 名字是 Android 入口，但内部已回退到 native 控制器 | **是，当前真实执行链路** |
+| 本仓库现状 | 文档中有 Android 专线路径说明 | 代码可运行主链路 |
+
+---
+
+#### 0.1 Android OpenGL（Java GLES）链路说明（补充）
+
+Android Java GLES 链路可以这样理解（Framework 侧）：
+
+1. FFmpeg 软解输出 Y/U/V 平面数据（ByteBuffer/byte[]）  
+2. 把 Y/U/V 送入 `GLSurfaceView.Renderer`（或自定义渲染线程）  
+3. Renderer 里创建三张纹理（Y/U/V）  
+4. 每帧 `glTexImage2D` / `glTexSubImage2D` 更新纹理内容  
+5. 片元着色器做 YUV->RGB  
+6. `glDrawArrays` 输出到 EGL Surface 显示
+
+这条是 **Android Java GLES 架构思路**；而你现在这个 Activity 的实际工程实现是把第 2~6 步放到了 native C++ 里做。
+
+`Activity -> FfmpegYuvPlaybackController -> YuvGlPlayerBridge(Java) -> JNI(yuv_gl_player_jni.cpp) -> YuvGlPlayer(C++) -> YuvFfmpegDecoder(C++) -> OpenGL ES2 -> SurfaceView`
+
+---
+
+#### 0.2 FFmpeg 软解码 -> OpenGL 纹理渲染（完整 Mermaid）
+
+```mermaid
+flowchart TD
+    A[用户点击播放<br/>YuvGlAndroidVideoPlayerActivity] --> B[FfmpegYuvPlaybackController.start]
+    B --> C[YuvGlPlayerBridge.setDataSource]
+    C --> D[YuvGlPlayerBridge.setSurface]
+    D --> E[YuvGlPlayerBridge.prepare]
+    E --> F[JNI: yuv_gl_player_jni.cpp]
+    F --> G[YuvGlPlayer.open + playThread]
+
+    subgraph FFmpegSoftDecode[FFmpeg 软解码阶段]
+        G --> H[avformat_open_input]
+        H --> I[avformat_find_stream_info]
+        I --> J[av_find_best_stream VIDEO]
+        J --> K[avcodec_find_decoder + avcodec_open2]
+        K --> L[av_read_frame]
+        L --> M[avcodec_send_packet]
+        M --> N[avcodec_receive_frame]
+        N --> O{像素格式是否 YUV420/422/444P}
+        O -->|是| P[直接使用解码帧]
+        O -->|否| Q[sws_scale 转 YUV420P]
+    end
+
+    subgraph GLTextureRender[OpenGL 纹理渲染阶段]
+        P --> R[initEglAndGl]
+        Q --> R
+        R --> S[编译 Shader<br/>Vertex + Fragment]
+        S --> T[创建 3 张纹理<br/>texY/texU/texV]
+        T --> U[uploadPlane Y]
+        U --> V[uploadPlane U]
+        V --> W[uploadPlane V]
+        W --> X[Fragment Shader<br/>YUV -> RGB]
+        X --> Y[glDrawArrays]
+        Y --> Z[eglSwapBuffers 上屏]
+    end
+
+    Z --> AA{还有下一帧?}
+    AA -->|有| L
+    AA -->|无/stop| AB[释放 EGL/GL/Decoder 资源]
+```
+
+这个图可同时覆盖两种思路：
+
+- **Android Java GLES 版本**：把 `GLTextureRender` 子图放到 `GLSurfaceView.Renderer` 中执行
+- **当前 C++ native 版本**：`GLTextureRender` 在 `yuv_gl_player.cpp` 里执行
+
+#### 1) FFmpeg 如何做软解码
+
+软解核心在 `yuv_ffmpeg_decoder.cpp`，流程是标准 demux + decode：
+
+1. `avformat_open_input` 打开媒体源  
+2. `avformat_find_stream_info` 读取流信息  
+3. `av_find_best_stream(..., AVMEDIA_TYPE_VIDEO, ...)` 选视频轨  
+4. `avcodec_find_decoder + avcodec_open2` 打开对应解码器  
+5. 循环 `av_read_frame -> avcodec_send_packet -> avcodec_receive_frame` 输出解码帧
+
+如果解码输出不是可直接渲染的 YUV 平面格式（420/422/444），就通过 `sws_scale` 统一转成 `YUV420P` 后再交给 OpenGL。
+
+支持直接渲染的格式：
+
+- `YUV420P / YUVJ420P`
+- `YUV422P / YUVJ422P`
+- `YUV444P / YUVJ444P`
+
+---
+
+#### 2) OpenGL 如何渲染 YUV
+
+渲染核心在 `yuv_gl_player.cpp`，关键步骤：
+
+1. 用 `ANativeWindow` 创建 EGL 环境（`eglGetDisplay/eglCreateContext/eglCreateWindowSurface`）  
+2. 编译并链接 GLES2 Program（顶点着色器 + 片元着色器）  
+3. 为 Y/U/V 创建三张 `GL_TEXTURE_2D` 纹理（`GL_LUMINANCE`）  
+4. 每帧把 `AVFrame` 的 `data[0]/data[1]/data[2]` 上传到 Y/U/V 三平面纹理  
+5. `glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)` 画全屏四边形  
+6. `eglSwapBuffers` 把 RGB 结果交换到 `SurfaceView`
+
+播放器还会基于 `PTS + time_base` 做节流睡眠，避免“解码过快、播放过快”：
+
+- 首帧记录 `firstPts` 与 `startClockUs`
+- 每帧计算媒体时间与墙钟时间差
+- `av_usleep(waitUs)` 对齐播放时钟
+
+---
+
+#### 3) OpenGL 如何把 YUV 转成 RGB
+
+使用的是 **GLES2 片元着色器**（`kFragmentShader`），采样三张纹理后做颜色空间转换。代码里是 BT.601 常用近似系数：
+
+```glsl
+precision mediump float;
+varying vec2 vTexCoord;
+uniform sampler2D uTexY;
+uniform sampler2D uTexU;
+uniform sampler2D uTexV;
+void main() {
+    float y = texture2D(uTexY, vTexCoord).r;
+    float u = texture2D(uTexU, vTexCoord).r - 0.5;
+    float v = texture2D(uTexV, vTexCoord).r - 0.5;
+    float r = y + 1.402 * v;
+    float g = y - 0.344136 * u - 0.714136 * v;
+    float b = y + 1.772 * u;
+    gl_FragColor = vec4(r, g, b, 1.0);
+}
+```
+
+要点：
+
+- **Y 纹理**提供亮度分量  
+- **U/V 纹理**提供色度分量（先减 0.5 还原有符号偏移）  
+- 片元着色器内逐像素计算 RGB，最终输出到 `gl_FragColor`
+
+---
+
+#### 4) 核心代码摘录（项目内）
+
+**(a) Activity 启动软解 + OpenGL 播放**
+
+```java
+int ret = playbackController.start(
+        currentVideoFile,
+        surfaceView.getHolder().getSurface(),
+        new FfmpegYuvPlaybackController.Listener() {
+            @Override
+            public void onVideoInfo(com.demo.aarlib.live.yuv.YuvGlPlayerBridge.VideoInfo info) {
+                tvVideoInfo.setText("视频信息: " + info.toString());
+            }
+        });
+```
+
+**(b) Java Bridge 串起 native 调用**
+
+```java
+ret = playerBridge.setDataSource(videoFile.getAbsolutePath());
+ret = playerBridge.setSurface(surface);
+ret = playerBridge.prepare();
+ret = playerBridge.play();
+```
+
+**(c) FFmpeg 软解主循环**
+
+```cpp
+int ret = av_read_frame(fmtCtx_, &packet);
+ret = avcodec_send_packet(codecCtx_, &packet);
+ret = avcodec_receive_frame(codecCtx_, decodeFrame_);
+ret = convertToRenderableFormat(decodeFrame_, &drawFrame, &drawFormat);
+```
+
+**(d) 非标准像素格式转 YUV420P**
+
+```cpp
+swsCtx_ = sws_getCachedContext(
+        swsCtx_,
+        srcFrame->width, srcFrame->height, (AVPixelFormat)srcFrame->format,
+        srcFrame->width, srcFrame->height, AV_PIX_FMT_YUV420P,
+        SWS_BILINEAR, nullptr, nullptr, nullptr);
+
+sws_scale(swsCtx_,
+          srcFrame->data, srcFrame->linesize,
+          0, srcFrame->height,
+          renderFrame_->data, renderFrame_->linesize);
+```
+
+**(e) OpenGL 三平面上传 + 绘制**
+
+```cpp
+uploadPlane(texY_, yWidth, yHeight, frame->data[0], frame->linesize[0], planeBufferY_);
+uploadPlane(texU_, uvWidth, uvHeight, frame->data[1], frame->linesize[1], planeBufferU_);
+uploadPlane(texV_, uvWidth, uvHeight, frame->data[2], frame->linesize[2], planeBufferV_);
+
+glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+eglSwapBuffers(eglDisplay_, eglSurface_);
+```
+
+这条链路本质上解决的是：系统硬解不稳定/不支持的格式，使用 FFmpeg 软解兜底，再由 OpenGL 在 GPU 侧完成 YUV->RGB 与上屏，保证兼容性与可控性。
 
 ### FFmpeg 在本项目中的集成
 
