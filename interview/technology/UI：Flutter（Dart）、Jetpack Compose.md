@@ -304,7 +304,275 @@ ListView.builder(
 )
 ```
 
+### Flutter中没有ViewModel是怎么实现State通知UI更新变化的？你能完整的描述Flutter中怎么使用MVI设计模式吗？
 
+#### Flutter中没有ViewModel是怎么实现State通知UI更新变化的？
+
+不用Livedata或者Sharedflow可以使用ChangeNotifier
+
+#### Flutter实现MVI
+
+* UiIntent 行为意图
+* UiState 页面唯一状态
+* UiEvent 一次性事件（Toast / 跳转）
+* MviViewModel 业务核心
+* Page UI 渲染
+
+代码实现
+
+* UiIntent（用户意图）
+```dart
+/// 页面行为意图（完全对应你写的 sealed class）
+sealed class InputUiIntent {
+  const InputUiIntent();
+
+  /// 输入框文字变化
+  factory InputUiIntent.textChanged(String text) = TextInputChanged;
+
+  /// 加载网络数据
+  factory InputUiIntent.loadNetData() = LoadNetData;
+}
+
+class TextInputChanged extends InputUiIntent {
+  final String text;
+  TextInputChanged(this.text);
+}
+
+class LoadNetData extends InputUiIntent {}
+```
+
+* UiState（页面唯一状态）
+```dart
+/// 页面UI状态（唯一数据源）
+class InputUiState {
+  final String inputText;
+  final bool isLoading;
+
+  InputUiState({
+    this.inputText = "",
+    this.isLoading = false,
+  });
+
+  /// 对应 Kotlin copy()
+  InputUiState copy({
+    String? inputText,
+    bool? isLoading,
+  }) {
+    return InputUiState(
+      inputText: inputText ?? this.inputText,
+      isLoading: isLoading ?? this.isLoading,
+    );
+  }
+}
+```
+
+* UiEvent（一次性事件：Toast / 弹窗 / 跳转）
+```dart
+/// 一次性事件
+sealed class InputUiEvent {
+  const InputUiEvent();
+
+  factory InputUiEvent.showToast(String msg) = ShowToast;
+}
+
+class ShowToast extends InputUiEvent {
+  final String msg;
+  ShowToast(this.msg);
+}
+```
+
+* MviViewModel（核心：状态管理 + 业务逻辑）
+
+这里用 Stream 实现 StateFlow
+```dart
+import 'dart:async';
+
+class InputMviViewModel {
+  // --------------------------
+  // 1. 页面状态 StateStream
+  // 对应：MutableStateFlow
+  // 特征：有缓存、新订阅者收到最新状态、单订阅
+  // --------------------------
+  final _uiStateController = StreamController<InputUiState>(); // ✅ 去掉 broadcast
+  InputUiState _currentState = InputUiState();
+
+  Stream<InputUiState> get uiState => _uiStateController.stream; // 只读
+  InputUiState get currentState => _currentState;
+
+  // --------------------------
+  // 2. 一次性事件 EventStream
+  // 对应：MutableSharedFlow
+  // 特征：无缓存、多订阅、一次性事件
+  // --------------------------
+  final _uiEventController = StreamController<InputUiEvent>.broadcast(); // ✅ 保留 broadcast
+
+  Stream<InputUiEvent> get uiEvent => _uiEventController.stream; // 只读
+
+  // --------------------------
+  // 3. 接收 Intent
+  // --------------------------
+  void sendIntent(InputUiIntent intent) {
+    switch (intent) {
+      case TextInputChanged():
+        _handleTextChanged(intent.text);
+      case LoadNetData():
+        _handleLoadNetData();
+    }
+  }
+
+  // 处理输入文字
+  void _handleTextChanged(String newText) {
+    _currentState = _currentState.copy(inputText: newText);
+    _uiStateController.add(_currentState);
+  }
+
+  // 处理网络加载
+  Future<void> _handleLoadNetData() async {
+    // 加载中
+    _currentState = _currentState.copy(isLoading: true);
+    _uiStateController.add(_currentState);
+
+    // 模拟网络请求
+    await Future.delayed(const Duration(seconds: 1));
+    final netText = "来自网络的默认文本";
+
+    // 更新状态
+    _currentState = _currentState.copy(
+      inputText: netText,
+      isLoading: false,
+    );
+    _uiStateController.add(_currentState);
+
+    // 发送一次性事件 Toast
+    _uiEventController.add(InputUiEvent.showToast("网络数据加载完成"));
+  }
+
+  // 关闭流
+  void dispose() {
+    _uiStateController.close();
+    _uiEventController.close();
+  }
+}
+```
+
+* Flutter UI 层（View）
+
+```dart
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+class InputMviPage extends StatefulWidget {
+  const InputMviPage({super.key});
+
+  @override
+  State<InputMviPage> createState() => _InputMviPageState();
+}
+
+class _InputMviPageState extends State<InputMviPage> {
+  final InputMviViewModel viewModel = InputMviViewModel();
+
+  @override
+  void initState() {
+    super.initState();
+    // 监听一次性事件 UiEvent
+    _listenUiEvent();
+  }
+
+  /// 监听 Toast/跳转等事件
+  void _listenUiEvent() {
+    viewModel.uiEvent.listen((event) {
+      if (event is ShowToast) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(event.msg)),
+        );
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text("Flutter MVI 示例")),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
+        child: StreamBuilder<InputUiState>(
+          stream: viewModel.uiState,
+          initialData: viewModel.currentState,
+          builder: (context, snapshot) {
+            final uiState = snapshot.data!;
+
+            return Column(
+              children: [
+                // 加载动画
+                if (uiState.isLoading)
+                  const CircularProgressIndicator(),
+
+                const SizedBox(height: 20),
+
+                // 输入框
+                TextField(
+                  controller: TextEditingController.fromValue(
+                    TextEditingValue(text: uiState.inputText),
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: "MVI 输入框",
+                    border: OutlineInputBorder(),
+                  ),
+                  onChanged: (text) {
+                    // 发送 Intent
+                    viewModel.sendIntent(InputUiIntent.textChanged(text));
+                  },
+                ),
+
+                const SizedBox(height: 10),
+
+                // 按钮
+                ElevatedButton(
+                  onPressed: () {
+                    viewModel.sendIntent(InputUiIntent.loadNetData());
+                  },
+                  child: const Text("加载网络数据"),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    viewModel.dispose();
+    super.dispose();
+  }
+}
+```
+
+
+##### 核心代码解释
+
+* StreamController是做什么用的？
+
+用来广播InputUiState，Stream<InputUiState>就是对状态更变的不断接收，所以view能直接自动更新。
+StreamController相当于MutableStateFlow是存储型（有缓存）
+
+* 核心比对
+1. `StreamController`相当于`MutableStateFlow`是存储型（有缓存）
+2. `StreamController.stream`相当于`StateFlow`对外只读。相当于保证了单项数据流
+3. `StreamController.broadcast()`相当于`MutableSharedFlow`。是不存储、多订阅、一次性事件
+4. `broadcast.stream`相当于`SharedFlow`对外只读
+
+
+`stream`流代表只读，`broadcast`广播代表不存储
+
+
+## Jetpack Compose
+
+### XML重构成Jetpack Compose和flutter你是怎么做的？
+
+* RecyclerView → LazyColumn
+* SwipeRefreshLayout → PullToRefreshBox
 
 
 
