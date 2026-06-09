@@ -393,17 +393,198 @@ BlockingQueue 是阻塞队列，线程安全，满了阻塞写、空了阻塞读
 
 ##### HashMap 和 Hashtable 的区别？
 
+线程是否安全： HashMap 是非线程安全的，Hashtable 是线程安全的,因为 Hashtable 内部的方法基本都经过synchronized 修饰。
+（如果你要保证线程安全的话就使用 ConcurrentHashMap 吧！）；效率：
+因为线程安全的问题，HashMap 要比 Hashtable 效率高一点。另外，Hashtable 基本被淘汰，不要在代码中使用它；
+
 ##### HashMap 和 HashSet 区别？
+
+看过 HashSet 源码的话就应该知道：HashSet 底层就是基于 HashMap 实现的。
+（HashSet 的源码非常非常少，因为除了 clone()、writeObject()、readObject()是 HashSet 自己不得不实现之外，
+其他方法都是直接调用 HashMap 中的方法。
+
+HashSet可以去重
 
 ##### HashMap 和 TreeMap 区别？
 
+TreeMap 和HashMap 都继承自AbstractMap ，但是需要注意的是TreeMap它还实现了NavigableMap接口和SortedMap 接口。
+
+* HashMap
+  * 查询效率：极高，平均时间复杂度 O(1)
+  * 增删效率：快，O (1)
+  * 排序能力：无内置排序
+  * 遍历方式：无序遍历
+
+* TreeMap
+  * 查询效率：较低，时间复杂度 O(log n)
+  * 增删效率：较慢，O (log n)（需维护树平衡）
+  * 排序能力：天然支持排序（自然排序 / 自定义 Comparator）
+  * 遍历方式：有序遍历
+
+Key是有序是Integer
+
 ##### HashSet 如何检查重复？
+
+HashSet 判断重复的逻辑，完全复用 HashMap 的去重规则。
+
+* hashSet.add(Object obj) 时：
+  * 第一步：调用 hashCode() 计算哈希值
+    * 先执行当前对象的 hashCode() 方法，得到哈希码；
+    * 根据哈希码计算出在底层 HashMap 数组中的存储下标
+    * 若该下标位置没有任何元素：直接存入，判定不重复
+  * 第二步：下标位置已有元素 → 调用 equals() 做内容比对
+    * 哈希值相等（哈希冲突）
+      * 再调用 equals() 方法，逐个比对对象内容
+      * equals() == false：认为是不同对象，继续挂载；
+      * equals() == true：判定元素重复，拒绝存入，add 方法返回 false。
+
+为什么先判 hashCode 再判 equals？
+- hashCode 是数字比较，效率极高；equals 往往是字段逐一对比，开销更大。
+- 先通过哈希码快速过滤大部分不同元素，提升整体判断效率。
+
+哈希冲突说明
+- 不同对象也可能出现 hashCode 相同（哈希碰撞），所以不能只靠哈希码去重，必须补充 equals 校验。
+
+```java
+// 自定义实体类
+class User {
+    private int id;
+    private String name;
+
+    public User(int id, String name) {
+        this.id = id;
+        this.name = name;
+    }
+
+    // 重写 equals：按业务字段判断内容是否相同
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        User user = (User) o;
+        return id == user.id && name.equals(user.name);
+    }
+
+    // 重写 hashCode：基于业务字段生成哈希码
+    @Override
+    public int hashCode() {
+        return Objects.hash(id, name);
+    }
+}
+
+// 测试去重
+public class Test {
+    public static void main(String[] args) {
+        HashSet<User> set = new HashSet<>();
+        User u1 = new User(1, "张三");
+        User u2 = new User(1, "张三"); // 内容一致，新对象
+
+        set.add(u1);
+        boolean isAdd = set.add(u2); 
+        // 输出 false：判定重复，添加失败
+        System.out.println(isAdd);
+    }
+}
+```
+
+#### Java的equal重写的时候为什么要重写HashCode？
+
+Object 默认的 hashCode 基于对象内存地址生成。
+以 HashSet 为例，它的去重规则是先比较 hashCode，哈希码不同直接判定为不同对象；
+哈希码相同时，再调用 equals 做内容比对。
+
+如果只重写 equals、不重写 hashCode，会出现内容完全一致的两个对象，
+内存地址不同、哈希码也不同，HashSet 会误判为两个独立对象，最终导致去重失效。
+
+就比如HashSet的去重会先判断HashCode，冲突才会调用equal。
+如果hashcode不重写，会直接导致HashSet去重失效。
 
 #### 请解释一下HashMap的工作原理。HashMap 的底层实现？数据怎么存入Hash表，数据怎么从Hash表取出？时空复杂度是怎样的？
 
+##### HashMap 的底层实现？
+
+数组 + 单向链表 + 红黑树；
+
+* 主体：哈希数组（桶数组），每个位置称为一个「桶 (bucket)」
+* 链表：单个桶内元素较多时，用单向链表挂载冲突元素
+* 红黑树：链表长度达到阈值，链表转为红黑树；元素减少再退化为链表
+
+* 插入：计算哈希 → 确定桶下标 → 桶位置判断 → 链表 / 树挂载 → 树化判断 → 扩容判断
+  - 首先计算 `key.hashCode()` 然后计算下标
+  - 判断桶位置是否有值：
+    - 没：直接插入
+    - 有：发生哈希冲突，尝试挂在链表
+  - 哈希冲突处理：挂载冲突元素
+  - 冲突元素过多，挂在红黑树
+
+* 获取：计算哈希 → 确定桶下标 → 桶位置判断 → 链表 / 树遍历
+
+* 时空复杂度：
+  * 正常情况（哈希分布均匀，冲突少）：put() / get() / remove()：平均 O (1)
+  * 极端情况（大量哈希冲突）
+    - 未树化（纯链表）：时间复杂度退化为 O(n)，需要遍历整条链表。
+    - 已树化（红黑树）：时间复杂度稳定为 O(log n)，红黑树查找 / 增删效率远高于链表。
+  * 空间复杂度 O(n)
+
+* 树的查询是log n明显小于n，为什么不上来就用树，用链表干啥
+  * 树要维护节点等，在n较小的时候空间复杂度较大，等到 n ≥ 8 之后树的优势才体现。
+
 #### HashMap 的长度为什么是 2 的幂次方
 
+为了用高效位运算替代取模运算计算数组下标，同时让元素分布更均匀、减少哈希冲突。下面分原理、推导、附加优势完整说明。
+
 #### HashMap在多线程环境下出现死循环？在Java 7环境下，多线程操作HashMap可能导致CPU 100%，为什么？如何解决？
+
+线程不安全，使用ConcurrentHashMap
+
+#### ConcurrentHashMap 线程安全的具体实现方式/底层具体实现？
+
+两层结构：Segment 数组 + 哈希桶数组 + 单向链表
+
+把整个大哈希表拆分成 16 个独立分段（Segment）
+不同分段的读写互不影响：操作哪个分段，就只给当前 Segment 加锁
+最多支持 16 个线程同时并发写，并发度 = Segment 数量
+
+#### ava中的数据结构一共有哪些？画一下继承树
+
+```mermaid
+graph LR
+    %% 顶层根接口
+    Object -->|implements| Iterable
+    Iterable -->|extends| Collection
+    
+    %% Collection 三大子接口
+    Collection --> List
+    Collection --> Set
+    Collection --> Queue
+    Queue --> Deque
+    
+    %% List 实现类
+    List --> ArrayList
+    List --> LinkedList
+    List --> Vector
+    Vector --> Stack
+    
+    %% Set 实现类
+    Set --> HashSet
+    HashSet --> LinkedHashSet
+    Set --> TreeSet
+    
+    %% Queue / Deque 实现类
+    Deque --> ArrayDeque
+    Deque --> LinkedList
+    Queue --> PriorityQueue
+    
+    %% Map 分支（独立根接口）
+    Object --> Map
+    Map --> HashMap
+    HashMap --> LinkedHashMap
+    Map --> TreeMap
+    Map --> Hashtable
+    Hashtable --> Properties
+    Map --> ConcurrentHashMap
+```
+
 
 ## Kotlin
 
