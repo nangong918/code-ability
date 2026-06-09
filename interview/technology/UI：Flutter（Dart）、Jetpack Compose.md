@@ -573,10 +573,172 @@ StreamController相当于MutableStateFlow是存储型（有缓存）
 
 * RecyclerView → LazyColumn
 * SwipeRefreshLayout → PullToRefreshBox
+* 自定义view → @Composable组合函数
+* Activity → 单一Activity + NavHost + NavController
+* 设计模式改为MVI单项数据流
+
+### DisposableEffect、SideEffect、LaunchedEffect之间的区别？
+
+首先理解UI重组：
+```kotlin
+// 或者collectAsStateWithLifecycle
+val uiState by viewModel.uiState.collectAsState()
+```
+只要uiState更新，就会触发UI重组
+
+* SideEffect：同步副作用，每次重组都执行，无键值，不延迟
+
+可以用来调试UI是否重组了
+```kotlin
+SideEffect {
+    // 每次重组都执行
+    Log.d("compose", "重组了")
+}
+```
 
 
+* LaunchedEffect：异步副作用，启动协程，可键值重启
+
+MVI 中收集 UiEvent
+```kotlin
+// 或者key不填写，直接用Unit
+LaunchedEffect(key1 = viewModel) {
+    // 异步
+    viewModel.uiEvent.collect { event ->
+        // 处理事件
+    }
+}
+```
+
+* DisposableEffect：需要销毁 / 释放资源的副作用，有清理回调
+
+需要在组件离开时清理 / 释放资源的副作用
+
+例子：播放音频，播放完成之后需要清理资源
+
+```kotlin
+@Composable
+fun AudioPlayPage(viewModel: AudioViewModel = viewModel()) {
+    val context = LocalContext.current
+
+    // ======================================
+    // ✅ 音频播放器：创建 + 释放 放在这里
+    // ======================================
+    val player = remember {
+        ExoPlayer.Builder(context).build()
+    }
+
+    DisposableEffect(Unit) {
+        // 进入时：什么都不做，等待播放指令
+
+        // 退出时：必须释放！！！
+        onDispose {
+            player.release() // 关键：销毁资源
+        }
+    }
+
+    // ======================================
+    // 监听 UI State（触发播放）
+    // ======================================
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
+    LaunchedEffect(uiState.playUrl) {
+        if (uiState.playUrl.isNotEmpty()) {
+            // 开始播放
+            val item = MediaItem.fromUri(uiState.playUrl)
+            player.setMediaItem(item)
+            player.prepare()
+            player.play()
+        }
+    }
+
+    // ======================================
+    // UI
+    // ======================================
+    Column(modifier = Modifier.fillMaxSize()) {
+        Button(onClick = {
+            // 发送意图：开始播放
+            viewModel.sendIntent(AudioIntent.PlayAudio("http://xxx.mp3"))
+        }) {
+            Text("播放音频")
+        }
+    }
+}
+```
+
+### pointer事件在各个Composable function之间是如何处理的？
+
+事件是按「命中测试 → 三阶段分发 → 消费标记」在各个 Composable 之间流转的，父子之间靠 Modifier 链传递，消费不会截断流程，只会打标记
+
+路径上的每个组件都会收到事件，分 Initial → Main → Final 三轮：
+
+* Initial（捕获，父→子）
+简单说就是看pointer点击在哪里了，从最大的开始往小聚拢
+
+* Main（冒泡，子→父）
+就是从子到父看看应该谁消费，做标记
+
+* Final（收尾，父→子）
+收尾、观察、复盘
+
+传统 View 消费就截断；Compose 消费不截断，只是打 “已消费” 标记，三阶段照样走完。
+
+#### 对比XML的MotionEvent分发机制OnTouchListener & OnTouchEvent & OnClickListener
+
+| 阶段                       | Compose Pointer 事件 | 传统 XML View (MotionEvent)                            | 对应回调         |
+|--------------------------|--------------------|------------------------------------------------------|--------------|
+| 1. 父优先拦截                 | Initial (父 → 子)    | ViewGroup.dispatchTouchEvent / onInterceptTouchEvent | 父亲先看，想拦就拦    |
+| 2. 子优先处理                 | Main (子 → 父)       | OnTouchListener → onTouchEvent                       | 子先消费，父亲后处理   |
+| 3. 事件消费                  | change.consume()   | return true                                          | 事件被吃掉，不再传递   |
+| 4. 点击触发                  | clickable / tap    | OnClickListener                                      | 事件消费后最终回调    |
+
+XML下发，父递归便利UI树
+```mermaid
+flowchart TD
+    A[手指 DOWN] --> B[根 ViewGroup dispatchTouchEvent]
+    B --> C[父ViewGroup onInterceptTouchEvent]
+    
+    C -->|拦截=true| D[父自己处理: onTouchEvent]
+    C -->|不拦截=false| E[传递给子 View]
+    
+    E --> F[子 View dispatchTouchEvent]
+    F --> G[子 View OnTouchListener.onTouch]
+    
+    G -->|return true 消费| H[事件结束，不再向上传递]
+    G -->|return false| I[子 View onTouchEvent]
+    
+    I -->|return true| H
+    I -->|return false| J[回传给父 onTouchEvent]
+    
+    G & I --> K[UP 事件触发 OnClickListener]
+```
+
+Compose下发
+```mermaid
+flowchart TD
+    A[手指 DOWN] --> B[命中测试 Hit Test 确定父子链]
+    
+    B --> C1["Initial 阶段<br/>父 → 子<br/>父可提前拦截/消费"]
+    
+    C1 --> C2["Main 阶段<br/>子 → 父<br/>子优先处理<br/>change.consume() 打标记"]
+    
+    C2 --> C3["Final 阶段<br/>父 → 子<br/>只读、收尾、水波纹<br/>不消费、不拦截"]
+    
+    C2 --> D{是否被消费?}
+    D -->|是| E[上层跳过处理]
+    D -->|否| F[继续向上传递]
+```
 
 
+### 在 Android 上，当一个 Flow 被 collectAsState，应用转入后台时，如果这个 Flow 再进行更新，对应的 State 会不会更新？对应的 Composable 函数会不会更新？
 
+* collectAsState 不感知声明周期
+  应用切后台 → Flow 继续收、State 会更新、Composable 会重组（即使不可见）
 
+* collectAsStateWithLifecycle
+  - 应用切后台（Activity/Fragment STOPPED）→ 自动暂停收集
+    - Flow 有新值也不会更新 State
+    - 不会触发 Composable 重组
+  - 切回前台（STARTED）→ 恢复收集，补发期间最新值
 
+不过补充：`collectAsStateWithLifecycle`是Android专属，KMP跨平台必须使用`collectAsState`
