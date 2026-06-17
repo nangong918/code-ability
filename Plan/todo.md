@@ -66,18 +66,19 @@
 
 ### 执行顺序
 1. 模拟面试
-2. 梳理面试问题文档并链接各个文档
-3. Java、Kotlin携程、C++（前3章） + JNI
-4. Android Framework
-5. 数据结构与算法
-6. UI：Flutter（Dart）、Jetpack Compose
-7. 操作系统（RK芯片Android系统，线程进程文件、Linux）
-8. 计算机网络（408、音视频流媒体）
-9. 计算机组成原理（408、音视频编解码）
-10. 软件开发（面向对象，设计模式，UML，软件工程）
-11. 数据库（MySQL，SQLite）
-12. 软件开发（面向对象，设计模式，UML，软件工程）
-13. 编译原理（CMake，Android.md，AOSP，RK）
+2. 理论（软件系统分析与设计）
+3. 梳理面试问题文档并链接各个文档
+4. Java、Kotlin携程、C++（前3章） + JNI
+5. Android Framework
+6. 数据结构与算法
+7. UI：Flutter（Dart）、Jetpack Compose
+8. 操作系统（RK芯片Android系统，线程进程文件、Linux）
+9. 计算机网络（408、音视频流媒体）
+10. 计算机组成原理（408、音视频编解码）
+11. 软件开发（面向对象，设计模式，UML，软件工程）
+12. 数据库（MySQL，SQLite）
+13. 软件开发（面向对象，设计模式，UML，软件工程）
+14. 编译原理（CMake，Android.md，AOSP，RK）
 
 
 
