@@ -1,5 +1,43 @@
 # Vector机器狗设计文档
 
+**基本项目介绍：**
+
+硬件方面：香橙派RK3588芯片搭载8个舵机作为四肢（关节大腿小腿）链接GPIO引脚；连接外设摄像头，麦克风，扬声器，MIPI屏幕作为表情；
+
+功能：
+- 要能语音唤醒，采用科大讯飞的离线语音唤醒SDK；
+- 首先会往RK3588芯片烧录Android12系统；
+- 自研前面板`Panel.apk`烧录成系统，用于控制LED表情；
+- 自研核心`Core.apk`烧录成系统应用，用于控制：
+  - JNI控制RK芯片上的C++程序控制 舵机、和外设
+  - 交互指令、MQTT + Http与云上通信：
+    - 科大讯飞离线语音唤醒SDK通过唤醒词唤醒，AudioRecord录音将语音流交给云端的STT模型转为文本；
+    - 摄像头录制实时YUV视频，并通过RK硬编码转为H264视频流，通过RTMP推至云上的流媒体服务器（Docker中的MediaMTX）
+    - SpringBoot拉取RTMP流将视频流推送给阿里云百炼的VL模型；
+    - VL结果和STT结果同步等待远端服务器结果，然后交给远端的LLM模型，生成【舵机运动指令，前面板表情指令，用户回复的文本+语音Byte流】
+  - 处理云上相关指令：
+    - AI运动相关指令通过JNI调用底层交给GPIO控制舵机；
+    - 文本转语音的TTS模型生成的byte音频流语音交给扬声器播放；
+    - AI的前面板表情相关指令通过AIDL给前面板Apk并展示在MIPI屏幕
+- 历史记忆：SpringBoot端接入SpringAI的AI基础+MySQL属性索引关系+MongoDB的JSON聊天指令记录+Neo4J构建知识图谱+Milvus存储文本记录向量
+- 客户端拉流监控：
+  - flutter双端app拉取AI历史思考记录以及查看知识图谱等
+  - flutter拉取vector狗子的RTMP实时摄像头画面并用media3实时播放；
+  - flutter远程操控：可以实时下达指令给vector狗子（flutter→springboot用websockt；springboot→vector用mqtt）
+- 客户端离线操控：
+  - 客户端离线操控vector：
+    - RK的`Core.apk`启动wifi让flutter app连接通过wifi传递udp画面，通过wifi传递udp指令
+    - (*有待商榷)或者在flutter app不方便开wifi连接的情况下使用BLE连接操机器狗，发送udp指令。
+
+
+## 软件工程
+
+[01-软件工程方法与需求.md](01-软件工程方法与需求.md)
+
+## 结构化分析与设计
+
+[02-结构化分析与模块设计.md](02-结构化分析与模块设计.md)
+
 ## 1. 文档目标
 
 本文档用于同时服务两个目标：
